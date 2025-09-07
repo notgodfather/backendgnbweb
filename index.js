@@ -10,6 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 app.post('/api/create-payment-order', async (req, res) => {
+    console.log('Received order:', req.body);
   const { orderId, orderAmount, customerDetails } = req.body;
 
   const clientId = process.env.CASHFREE_CLIENT_ID;
