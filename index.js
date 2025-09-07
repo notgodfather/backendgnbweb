@@ -1,18 +1,15 @@
 const admin = require('firebase-admin');
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
-const crypto = require('crypto');
-require('dotenv').config();
-
-// ---- Use env variable instead of a file ----
-const serviceAccount = JSON.parse(process.env.GOOGLE_CREDS_JSON);
+const serviceAccount = require('./serviceAccountKey.json');
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
 const db = admin.firestore();
+require('dotenv').config();
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -26,7 +23,8 @@ app.use(express.json());
 
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
-const API_VERSION = "2023-08-01";
+const API_VERSION = "2023-08-01";  // Use your account's enabled version
+
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 
 function authHeaders() {
@@ -49,22 +47,6 @@ function computeAmountFromCart(cart) {
     if (p < 0 || q < 0) throw new Error("Invalid price or quantity");
     return sum + p * q;
   }, 0).toFixed(2);
-}
-
-// Verify webhook signature helper
-function verifyCashfreeSignature(req) {
-  const signature = req.headers['x-cf-webhook-signature'];
-  const body = JSON.stringify(req.body);
-  const secret = process.env.CASHFREE_WEBHOOK_SECRET; // Set this in .env
-
-  if (!signature || !secret) return false;
-
-  const computedSignature = crypto
-    .createHmac('sha256', secret)
-    .update(body)
-    .digest('base64');
-
-  return signature === computedSignature;
 }
 
 app.post('/api/create-order', async (req, res) => {
@@ -133,45 +115,10 @@ app.post('/api/verify-order', async (req, res) => {
   }
 });
 
-app.post('/api/cashfree/webhook', express.json({ type: '*/*' }), async (req, res) => {
-  try {
-    if (!verifyCashfreeSignature(req)) {
-      console.warn("Invalid webhook signature");
-      return res.status(403).send("Forbidden");
-    }
-
-    const evt = req.body;
-    const orderId = evt?.data?.order?.order_id;
-    const paymentStatus = evt?.data?.payment?.payment_status;
-
-    console.log(`Webhook received for order ${orderId} with status ${paymentStatus}`);
-
-    if (orderId && paymentStatus === 'SUCCESS') {
-      const ordersRef = db.collection('orders');
-      const existing = await ordersRef.where('orderId', '==', orderId).limit(1).get();
-
-      if (existing.empty) {
-        await ordersRef.add({
-          orderId,
-          status: 'paid',
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        console.log(`Order ${orderId} saved to Firestore.`);
-      } else {
-        await existing.docs[0].ref.update({
-          status: 'paid',
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        console.log(`Order ${orderId} updated in Firestore.`);
-      }
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("Webhook error:", err.message);
-    res.sendStatus(500);
-  }
+// Optional webhook to receive order updates from Cashfree
+app.post('/api/cashfree/webhook', express.json({ type: '*/*' }), (req, res) => {
+  // Implement webhook verification & order status update as needed
+  res.sendStatus(200);
 });
 
 app.listen(PORT, () => console.log(`Server running at port ${PORT}`));
