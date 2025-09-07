@@ -33,7 +33,7 @@ app.post('/api/create-payment-order', async (req, res) => {
     'Content-Type': 'application/json',
     'x-client-id': clientId,
     'x-client-secret': clientSecret,
-    'x-api-version': '2022-09-01',
+    'x-api-version': '2025-01-01',
   };
 
   try {
