@@ -10,7 +10,8 @@ app.use(cors());
 app.use(express.json());
 
 app.post('/api/create-payment-order', async (req, res) => {
-    console.log('Received order:', req.body);
+  console.log('Received order:', req.body);
+
   const { orderId, orderAmount, customerDetails } = req.body;
 
   const clientId = process.env.CASHFREE_CLIENT_ID;
@@ -21,7 +22,11 @@ app.post('/api/create-payment-order', async (req, res) => {
     order_id: orderId,
     order_amount: orderAmount,
     order_currency: 'INR',
-    customer_details: customerDetails,
+    customer_details: {
+      customer_id: customerDetails.customer_id,
+      customer_email: customerDetails.customer_email,
+      customer_phone: customerDetails.customer_phone || '9999999999',  // fallback phone number
+    },
   };
 
   const headers = {
@@ -33,6 +38,10 @@ app.post('/api/create-payment-order', async (req, res) => {
 
   try {
     const response = await axios.post(cashfreeURL, data, { headers });
+
+    // Logging the full response from Cashfree for easier debugging
+    console.log('Cashfree response:', response.data);
+
     if (response.data.status === 'OK') {
       res.json({ paymentSessionId: response.data.payment_session_id });
     } else {
