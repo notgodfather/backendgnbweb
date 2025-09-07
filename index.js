@@ -1,10 +1,12 @@
 const admin = require('firebase-admin');
-const serviceAccount = require('./serviceAccountKey.json');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
 require('dotenv').config();
+
+// ---- Use env variable instead of a file ----
+const serviceAccount = JSON.parse(process.env.GOOGLE_CREDS_JSON);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -24,7 +26,7 @@ app.use(express.json());
 
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
-const API_VERSION = "2023-08-01";  // Use your account's enabled version
+const API_VERSION = "2023-08-01";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 
 function authHeaders() {
@@ -140,7 +142,7 @@ app.post('/api/cashfree/webhook', express.json({ type: '*/*' }), async (req, res
 
     const evt = req.body;
     const orderId = evt?.data?.order?.order_id;
-    const paymentStatus = evt?.data?.payment?.payment_status; // e.g. "SUCCESS"
+    const paymentStatus = evt?.data?.payment?.payment_status;
 
     console.log(`Webhook received for order ${orderId} with status ${paymentStatus}`);
 
@@ -171,6 +173,5 @@ app.post('/api/cashfree/webhook', express.json({ type: '*/*' }), async (req, res
     res.sendStatus(500);
   }
 });
-
 
 app.listen(PORT, () => console.log(`Server running at port ${PORT}`));
