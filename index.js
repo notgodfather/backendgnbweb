@@ -52,7 +52,6 @@ app.post('/api/create-order', async (req, res) => {
     const orderAmount = computeAmountFromCart(cart);
     if (orderAmount <= 0) return res.status(400).json({ error: 'Invalid cart amount' });
 
-    // Generate temporary unique order ID for Cashfree only
     const cashfreeOrderId = 'order_' + Date.now();
 
     const payload = {
@@ -68,18 +67,22 @@ app.post('/api/create-order', async (req, res) => {
       order_note: 'College canteen order',
       order_meta: {
         return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`,
-        notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`, // optional webhook URL
+        notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`,
       },
     };
 
     const response = await axios.post(`${BASE_URL}/orders`, payload, { headers: authHeaders() });
     const { payment_session_id, cf_order_id } = response.data;
 
+    console.log('Create order response from Cashfree:', response.data);
+
     if (!payment_session_id) {
       return res.status(500).json({ error: 'No payment_session_id from Cashfree', raw: response.data });
     }
 
+    // Return both sent and received IDs for clarity
     return res.json({
+      sentOrderId: cashfreeOrderId,
       cfOrderId: cf_order_id,
       paymentSessionId: payment_session_id,
       amount: orderAmount,
@@ -92,16 +95,20 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// Verify Cashfree payment order status (does NOT update DB here)
+
 app.post('/api/verify-order', async (req, res) => {
   try {
     const { orderId } = req.body;
+    console.log('Verifying order with ID:', orderId);
+
     if (!orderId) return res.status(400).json({ error: 'Missing orderId' });
 
     const response = await axios.get(`${BASE_URL}/orders/${orderId}`, { headers: authHeaders() });
     const data = response.data;
 
-    const status = data.order_status || 'UNKNOWN'; // PAID, ACTIVE, EXPIRED, etc.
+    console.log('Verify order response from Cashfree:', data);
+
+    const status = data.order_status || 'UNKNOWN';
 
     res.json({ status });
   } catch (error) {
@@ -109,6 +116,7 @@ app.post('/api/verify-order', async (req, res) => {
     res.status(500).json({ error: 'Verify failed', details: error.response?.data || error.message });
   }
 });
+
 
 // Record final order and items in Supabase after confirmed payment success
 app.post('/api/record-order', async (req, res) => {
