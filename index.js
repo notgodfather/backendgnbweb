@@ -143,7 +143,7 @@ app.post('/api/record-order', async (req, res) => {
         id: orderId,
         user_id: userId,
         user_email: userEmail,
-        status: 'Completed',
+        status: 'Preparing',
         created_at: new Date().toISOString(),
       }])
       .select('id')
