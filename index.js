@@ -2,16 +2,25 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Supabase client for admin operations
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // Allow your frontend origin, adjust if needed
 app.use(cors({
   origin: process.env.CORS_ORIGIN || '*'
 }));
 
-app.use(express.json());
+// Middleware to get raw body for webhook signature verification
+const rawBodyMiddleware = (req, res, buf) => {
+  req.rawBody = buf;
+};
+app.use(express.json({ verify: rawBodyMiddleware }));
 
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
@@ -27,37 +36,28 @@ function authHeaders() {
   };
 }
 
-function makeOrderId() {
-  return 'order_' + Date.now();
-}
-
 function computeAmountFromCart(cart) {
   if (!Array.isArray(cart)) return 0;
   return cart.reduce((sum, { price, quantity }) => {
     const p = Number(price);
     const q = Number(quantity);
-    if (p < 0 || q < 0) throw new Error("Invalid price or quantity");
+    if (isNaN(p) || isNaN(q) || p < 0 || q < 0) throw new Error("Invalid price or quantity");
     return sum + p * q;
   }, 0).toFixed(2);
 }
 
 app.post('/api/create-order', async (req, res) => {
   try {
-    const { cart, user } = req.body;
+    const { cart, user, order_id } = req.body;
     if (!user?.uid) return res.status(400).json({ error: 'Missing user info' });
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Cart is empty' });
+    if (!order_id) return res.status(400).json({ error: 'order_id is required' });
 
     const orderAmount = computeAmountFromCart(cart);
     if (orderAmount <= 0) return res.status(400).json({ error: 'Invalid cart amount' });
 
-    const orderId = req.body.order_id; // Use the order ID from frontend
-if (!orderId) {
-  return res.status(400).json({ error: 'order_id is required' });
-}
-
-
     const payload = {
-      order_id: orderId,
+      order_id: order_id,
       order_amount: orderAmount,
       order_currency: 'INR',
       customer_details: {
@@ -81,7 +81,7 @@ if (!orderId) {
     }
 
     return res.json({
-      orderId,
+      orderId: order_id,
       cfOrderId: cf_order_id,
       paymentSessionId: payment_session_id,
       amount: orderAmount,
@@ -111,10 +111,49 @@ app.post('/api/verify-order', async (req, res) => {
   }
 });
 
-// Optional webhook to receive order updates from Cashfree
-app.post('/api/cashfree/webhook', express.json({ type: '*/*' }), (req, res) => {
-  // Implement webhook verification & order status update as needed
-  res.sendStatus(200);
+// Cashfree webhook endpoint to update Supabase order status
+app.post('/api/cashfree/webhook', async (req, res) => {
+  try {
+    // Verify webhook signature
+    const secret = process.env.CASHFREE_WEBHOOK_SECRET;
+    const signature = req.headers['x-cf-webhook-signature'];
+
+    const hash = crypto.createHmac('sha256', secret).update(req.rawBody).digest('hex');
+    if (hash !== signature) {
+      console.error('Webhook signature mismatch');
+      return res.status(401).send('Unauthorized');
+    }
+
+    const event = JSON.parse(req.rawBody.toString());
+
+    const orderId = event.order_id || event.cf_order_id;
+    const orderStatus = event.order_status || event.status;
+
+    let newStatus;
+    if (orderStatus === 'PAID' || orderStatus === 'SUCCESS') {
+      newStatus = 'Completed';
+    } else if (orderStatus === 'FAILED' || orderStatus === 'CANCELLED') {
+      newStatus = 'Failed';
+    } else {
+      newStatus = 'Pending';
+    }
+
+    // Update order status in Supabase
+    const { error } = await supabase
+      .from('orders')
+      .update({ status: newStatus })
+      .eq('id', orderId);
+
+    if (error) {
+      console.error('Supabase update error:', error);
+      return res.status(500).send('Database update error');
+    }
+
+    res.status(200).send('Webhook received');
+  } catch (err) {
+    console.error('Webhook processing error:', err);
+    res.status(500).send('Server error');
+  }
 });
 
 app.listen(PORT, () => console.log(`Server running at port ${PORT}`));
