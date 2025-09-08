@@ -2,7 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -16,11 +15,7 @@ app.use(cors({
   origin: process.env.CORS_ORIGIN || '*'
 }));
 
-// Middleware to get raw body for webhook signature verification
-const rawBodyMiddleware = (req, res, buf) => {
-  req.rawBody = buf;
-};
-app.use(express.json({ verify: rawBodyMiddleware }));
+app.use(express.json());
 
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
@@ -69,7 +64,7 @@ app.post('/api/create-order', async (req, res) => {
       order_note: 'College canteen order',
       order_meta: {
         return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`,
-        notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`,
+        notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`, // optional, no webhook logic here though
       },
     };
 
@@ -88,7 +83,6 @@ app.post('/api/create-order', async (req, res) => {
       currency: 'INR',
       envMode: isSandbox ? 'sandbox' : 'production',
     });
-
   } catch (error) {
     console.error('Create order error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Create order failed', details: error.response?.data || error.message });
@@ -104,67 +98,23 @@ app.post('/api/verify-order', async (req, res) => {
     const data = response.data;
 
     const status = data.order_status || 'UNKNOWN'; // PAID, ACTIVE, EXPIRED, etc.
+
+    // Update Supabase order status on successful payment
+    if (status === 'PAID' || status === 'SUCCESS') {
+      const { error } = await supabase
+        .from('orders')
+        .update({ status: 'Completed' })
+        .eq('id', orderId);
+      if (error) {
+        console.error('Supabase update error:', error);
+        return res.status(500).json({ error: 'Failed to update order status' });
+      }
+    }
+
     res.json({ status });
   } catch (error) {
     console.error('Verify order error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Verify failed', details: error.response?.data || error.message });
-  }
-});
-
-// Cashfree webhook endpoint to update Supabase order status
-app.post('/api/cashfree/webhook', async (req, res) => {
-  try {
-    // Use Client Secret as the key for verification (not a separate webhook secret)
-    const clientSecret = process.env.CASHFREE_CLIENT_SECRET;
-
-    const timestamp = req.headers['x-webhook-timestamp'];
-    const signature = req.headers['x-webhook-signature'];
-
-    // Build the signed payload string: timestamp + '.' + rawBody
-    const rawBody = req.rawBody.toString();
-    const signedPayload = `${timestamp}.${rawBody}`;
-
-    // Create HMAC SHA256 and digest as base64
-    const generatedSignature = crypto.createHmac('sha256', clientSecret)
-      .update(signedPayload)
-      .digest('base64');
-
-    // Verify if signature matches
-    if (generatedSignature !== signature) {
-      console.error('Webhook signature mismatch');
-      return res.status(401).send('Unauthorized');
-    }
-
-    // Parse event JSON
-    const event = JSON.parse(rawBody);
-
-    const orderId = event.order_id || event.cf_order_id;
-    const orderStatus = event.order_status || event.status;
-
-    let newStatus;
-    if (orderStatus === 'PAID' || orderStatus === 'SUCCESS') {
-      newStatus = 'Completed';
-    } else if (orderStatus === 'FAILED' || orderStatus === 'CANCELLED') {
-      newStatus = 'Failed';
-    } else {
-      newStatus = 'Pending';
-    }
-
-    // Update order status in Supabase
-    const { error } = await supabase
-      .from('orders')
-      .update({ status: newStatus })
-      .eq('id', orderId);
-
-    if (error) {
-      console.error('Supabase update error:', error);
-      return res.status(500).send('Database update error');
-    }
-
-    res.status(200).send('Webhook received');
-  } catch (err) {
-    console.error('Webhook processing error:', err);
-    res.status(500).send('Server error');
   }
 });
 
