@@ -41,18 +41,18 @@ function computeAmountFromCart(cart) {
   }, 0).toFixed(2);
 }
 
+// Create Cashfree payment order
 app.post('/api/create-order', async (req, res) => {
   try {
-    const { cart, user, order_id } = req.body;
+    const { cart, user } = req.body;
     if (!user?.uid) return res.status(400).json({ error: 'Missing user info' });
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Cart is empty' });
-    if (!order_id) return res.status(400).json({ error: 'order_id is required' });
 
     const orderAmount = computeAmountFromCart(cart);
     if (orderAmount <= 0) return res.status(400).json({ error: 'Invalid cart amount' });
 
     const payload = {
-      order_id: order_id,
+      order_id: 'order_' + Date.now(),  // generate temporary order ID to send to Cashfree
       order_amount: orderAmount,
       order_currency: 'INR',
       customer_details: {
@@ -64,7 +64,7 @@ app.post('/api/create-order', async (req, res) => {
       order_note: 'College canteen order',
       order_meta: {
         return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`,
-        notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`, // optional, no webhook logic here though
+        notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`,  // optional, no webhook logic assumed here
       },
     };
 
@@ -76,7 +76,6 @@ app.post('/api/create-order', async (req, res) => {
     }
 
     return res.json({
-      orderId: order_id,
       cfOrderId: cf_order_id,
       paymentSessionId: payment_session_id,
       amount: orderAmount,
@@ -89,6 +88,7 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
+// Verify Cashfree payment order status and update Supabase if Paid
 app.post('/api/verify-order', async (req, res) => {
   try {
     const { orderId } = req.body;
@@ -99,12 +99,21 @@ app.post('/api/verify-order', async (req, res) => {
 
     const status = data.order_status || 'UNKNOWN'; // PAID, ACTIVE, EXPIRED, etc.
 
-    // Update Supabase order status on successful payment
     if (status === 'PAID' || status === 'SUCCESS') {
+      // Update Supabase order if exists & set Completed
+      const { data: orderExists } = await supabase.from('orders').select('id').eq('id', orderId).single();
+
+      if (!orderExists) {
+        // Not exists yet so create now
+        // This assumes all cart info must be sent from frontend to record order
+        return res.status(404).json({ error: 'Order record not found, use record-order endpoint instead.' });
+      }
+
       const { error } = await supabase
         .from('orders')
         .update({ status: 'Completed' })
         .eq('id', orderId);
+
       if (error) {
         console.error('Supabase update error:', error);
         return res.status(500).json({ error: 'Failed to update order status' });
@@ -115,6 +124,47 @@ app.post('/api/verify-order', async (req, res) => {
   } catch (error) {
     console.error('Verify order error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Verify failed', details: error.response?.data || error.message });
+  }
+});
+
+// Record order and order_items after confirmed payment success
+app.post('/api/record-order', async (req, res) => {
+  try {
+    const { userId, userEmail, cart, orderId } = req.body;
+    if (!userId || !Array.isArray(cart) || cart.length === 0) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Insert order with status 'Completed'
+    const { data: order, error: orderErr } = await supabase
+      .from('orders')
+      .insert([{
+        id: orderId,  // use the order ID from Cashfree verification for sync
+        user_id: userId,
+        user_email: userEmail,
+        status: 'Completed',
+        created_at: new Date().toISOString(),
+      }])
+      .select('id')
+      .single();
+
+    if (orderErr) throw orderErr;
+
+    // Insert order items
+    const itemsPayload = cart.map(ci => ({
+      order_id: order.id,
+      item_id: ci.item.id,
+      qty: ci.qty,
+      price: Number(ci.item.price),
+    }));
+
+    const { error: itemErr } = await supabase.from('order_items').insert(itemsPayload);
+    if (itemErr) throw itemErr;
+
+    res.json({ success: true, orderId: order.id });
+  } catch (err) {
+    console.error('Record order error:', err);
+    res.status(500).json({ error: 'Failed to record order' });
   }
 });
 
