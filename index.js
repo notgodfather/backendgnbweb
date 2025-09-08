@@ -50,7 +50,11 @@ app.post('/api/create-order', async (req, res) => {
     const orderAmount = computeAmountFromCart(cart);
     if (orderAmount <= 0) return res.status(400).json({ error: 'Invalid cart amount' });
 
-    const orderId = makeOrderId();
+    const orderId = req.body.order_id; // Use the order ID from frontend
+if (!orderId) {
+  return res.status(400).json({ error: 'order_id is required' });
+}
+
 
     const payload = {
       order_id: orderId,
