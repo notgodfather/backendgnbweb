@@ -52,6 +52,7 @@ app.post('/api/create-order', async (req, res) => {
     const orderAmount = computeAmountFromCart(cart);
     if (orderAmount <= 0) return res.status(400).json({ error: 'Invalid cart amount' });
 
+    // Use original string order ID for Cashfree order
     const cashfreeOrderId = 'order_' + Date.now();
 
     const payload = {
@@ -72,7 +73,7 @@ app.post('/api/create-order', async (req, res) => {
     };
 
     const response = await axios.post(`${BASE_URL}/orders`, payload, { headers: authHeaders() });
-    const { payment_session_id, cf_order_id } = response.data;
+    const { payment_session_id } = response.data;
 
     console.log('Create order response from Cashfree:', response.data);
 
@@ -80,10 +81,9 @@ app.post('/api/create-order', async (req, res) => {
       return res.status(500).json({ error: 'No payment_session_id from Cashfree', raw: response.data });
     }
 
-    // Return both sent and received IDs for clarity
+    // Return ONLY the original string order ID for frontend usage
     return res.json({
-      sentOrderId: cashfreeOrderId,
-      cfOrderId: cf_order_id,
+      orderId: cashfreeOrderId,
       paymentSessionId: payment_session_id,
       amount: orderAmount,
       currency: 'INR',
@@ -95,7 +95,7 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-
+// Verify Cashfree payment order status
 app.post('/api/verify-order', async (req, res) => {
   try {
     const { orderId } = req.body;
@@ -116,7 +116,6 @@ app.post('/api/verify-order', async (req, res) => {
     res.status(500).json({ error: 'Verify failed', details: error.response?.data || error.message });
   }
 });
-
 
 // Record final order and items in Supabase after confirmed payment success
 app.post('/api/record-order', async (req, res) => {
