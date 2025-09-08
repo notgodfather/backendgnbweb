@@ -114,17 +114,29 @@ app.post('/api/verify-order', async (req, res) => {
 // Cashfree webhook endpoint to update Supabase order status
 app.post('/api/cashfree/webhook', async (req, res) => {
   try {
-    // Verify webhook signature
-    const secret = process.env.CASHFREE_WEBHOOK_SECRET;
-    const signature = req.headers['x-cf-webhook-signature'];
+    // Use Client Secret as the key for verification (not a separate webhook secret)
+    const clientSecret = process.env.CASHFREE_CLIENT_SECRET;
 
-    const hash = crypto.createHmac('sha256', secret).update(req.rawBody).digest('hex');
-    if (hash !== signature) {
+    const timestamp = req.headers['x-webhook-timestamp'];
+    const signature = req.headers['x-webhook-signature'];
+
+    // Build the signed payload string: timestamp + '.' + rawBody
+    const rawBody = req.rawBody.toString();
+    const signedPayload = `${timestamp}.${rawBody}`;
+
+    // Create HMAC SHA256 and digest as base64
+    const generatedSignature = crypto.createHmac('sha256', clientSecret)
+      .update(signedPayload)
+      .digest('base64');
+
+    // Verify if signature matches
+    if (generatedSignature !== signature) {
       console.error('Webhook signature mismatch');
       return res.status(401).send('Unauthorized');
     }
 
-    const event = JSON.parse(req.rawBody.toString());
+    // Parse event JSON
+    const event = JSON.parse(rawBody);
 
     const orderId = event.order_id || event.cf_order_id;
     const orderStatus = event.order_status || event.status;
