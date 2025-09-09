@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -10,19 +11,26 @@ const PORT = process.env.PORT || 5000;
 // Supabase client for admin operations
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// Allow your frontend origin, adjust if needed
+// Allow your frontend origin
 app.use(cors({
   origin: process.env.CORS_ORIGIN || '*'
 }));
-app.use(express.json());
+
+// Use express.json() for all routes EXCEPT the webhook
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/cashfree/webhook') {
+    next();
+  } else {
+    express.json()(req, res, next);
+  }
+});
 
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
 const API_VERSION = "2023-08-01";
-
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 
-// Helper for headers for Cashfree API
+// Helper for Cashfree API headers
 function authHeaders() {
   return {
     'x-client-id': process.env.CASHFREE_CLIENT_ID,
@@ -31,7 +39,7 @@ function authHeaders() {
   };
 }
 
-// Helper to compute order amount from cart
+// Helper to compute order amount
 function computeAmountFromCart(cart) {
   if (!Array.isArray(cart)) return 0;
   return cart.reduce((sum, { price, quantity }) => {
@@ -42,7 +50,7 @@ function computeAmountFromCart(cart) {
   }, 0).toFixed(2);
 }
 
-// Create Cashfree payment order
+// 1. Create Order Endpoint (Corrected Logic)
 app.post('/api/create-order', async (req, res) => {
   try {
     const { cart, user } = req.body;
@@ -52,22 +60,45 @@ app.post('/api/create-order', async (req, res) => {
     const orderAmount = computeAmountFromCart(cart);
     if (orderAmount <= 0) return res.status(400).json({ error: 'Invalid cart amount' });
 
-    // Use original string order ID for Cashfree order
-    const cashfreeOrderId = 'order_' + Date.now();
+    // Step 1: Create a 'Pending Payment' order in Supabase to get a unique UUID.
+    const { data: newOrder, error: orderErr } = await supabase
+      .from('orders')
+      .insert([{
+        user_id: user.uid,
+        user_email: user.email,
+        status: 'Pending Payment',
+      }])
+      .select('id')
+      .single();
 
+    if (orderErr) throw orderErr;
+    const newOrderId = newOrder.id; // This is your new, unique UUID
+
+    // Step 2: Immediately insert the items into the 'order_items' table.
+    const itemsPayload = cart.map(item => ({
+        order_id: newOrderId,
+        item_id: item.id, // Assumes your cart item object has an 'id'
+        quantity: item.quantity,
+        price: Number(item.price), // Uses the price from the cart at time of purchase
+    }));
+
+    const { error: itemErr } = await supabase.from('order_items').insert(itemsPayload);
+    if (itemErr) throw itemErr;
+
+    // Step 3: Create the Cashfree order using the real UUID
     const payload = {
-      order_id: cashfreeOrderId,
+      order_id: newOrderId,
       order_amount: orderAmount,
       order_currency: 'INR',
       customer_details: {
         customer_id: user.uid,
         customer_name: user.displayName || 'Guest',
-        customer_email: user.email || 'noemail@example.com',
+        customer_email: user.email,
         customer_phone: user.phoneNumber || '9999999999',
       },
-      order_note: 'College canteen order',
+      order_note: 'GrabNGo Canteen Order',
       order_meta: {
-        return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`,
+        return_url: `${PUBLIC_BASE_URL}/orders/${newOrderId}`,
         notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`,
       },
     };
@@ -75,15 +106,13 @@ app.post('/api/create-order', async (req, res) => {
     const response = await axios.post(`${BASE_URL}/orders`, payload, { headers: authHeaders() });
     const { payment_session_id } = response.data;
 
-    console.log('Create order response from Cashfree:', response.data);
-
     if (!payment_session_id) {
-      return res.status(500).json({ error: 'No payment_session_id from Cashfree', raw: response.data });
+      // If Cashfree fails, you could optionally clean up the order and items here, but it's often left for simplicity.
+      return res.status(500).json({ error: 'Failed to create payment session', raw: response.data });
     }
 
-    // Return ONLY the original string order ID for frontend usage
     return res.json({
-      orderId: cashfreeOrderId,
+      orderId: newOrderId,
       paymentSessionId: payment_session_id,
       amount: orderAmount,
       currency: 'INR',
@@ -91,82 +120,72 @@ app.post('/api/create-order', async (req, res) => {
     });
   } catch (error) {
     console.error('Create order error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Create order failed', details: error.response?.data || error.message });
+    res.status(500).json({ error: 'Failed to create order', details: error.response?.data || error.message });
   }
 });
 
-// Verify Cashfree payment order status
-app.post('/api/verify-order', async (req, res) => {
+// 2. Cashfree Webhook Endpoint (Simplified Logic)
+app.post('/api/cashfree/webhook', express.raw({type: 'application/json'}), async (req, res) => {
   try {
-    const { orderId } = req.body;
-    console.log('Verifying order with ID:', orderId);
+    const signature = req.headers['x-webhook-signature'];
+    const timestamp = req.headers['x-webhook-timestamp'];
+    const payload = req.body;
+    const secret = process.env.CASHFREE_WEBHOOK_SECRET;
 
-    if (!orderId) return res.status(400).json({ error: 'Missing orderId' });
-
-    const response = await axios.get(`${BASE_URL}/orders/${orderId}`, { headers: authHeaders() });
-    const data = response.data;
-
-    console.log('Verify order response from Cashfree:', data);
-
-    const status = data.order_status || 'UNKNOWN';
-
-    res.json({ status });
-  } catch (error) {
-    console.error('Verify order error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Verify failed', details: error.response?.data || error.message });
-  }
-});
-
-// Record final order and items in Supabase after confirmed payment success
-app.post('/api/record-order', async (req, res) => {
-  try {
-    const { userId, userEmail, cart, orderId } = req.body;
-    if (!userId || !Array.isArray(cart) || cart.length === 0 || !orderId) {
-      return res.status(400).json({ error: 'Missing required fields' });
+    if (!signature || !timestamp || !secret) {
+        return res.status(400).send('Webhook headers missing');
     }
 
-    // Check for duplicate order
-    const { data: existingOrder } = await supabase
-      .from('orders')
-      .select('id')
-      .eq('id', orderId)
-      .single();
+    // Verify the webhook signature
+    const verifier = crypto.createHmac('sha256', secret);
+    verifier.update(`${timestamp}${payload.toString()}`);
+    const generatedSignature = verifier.digest('base64');
 
-    if (existingOrder) {
-      return res.status(409).json({ error: 'Order already recorded' });
+    if (generatedSignature !== signature) {
+        return res.status(400).send('Invalid webhook signature');
     }
 
-    // Insert order record with status Completed
-    const { data: order, error: orderErr } = await supabase
-      .from('orders')
-      .insert([{
-        id: orderId,
-        user_id: userId,
-        user_email: userEmail,
-        status: 'Preparing',
-        created_at: new Date().toISOString(),
-      }])
-      .select('id')
-      .single();
+    const data = JSON.parse(payload.toString());
+    const eventType = data.type;
+    const orderData = data.data.order;
 
-    if (orderErr) throw orderErr;
+    // We only care about successful payments
+    if (eventType === 'PAYMENT_SUCCESS_WEBHOOK' && orderData.order_status === 'PAID') {
+        const orderId = orderData.order_id;
 
-    // Insert order items
-    const itemsPayload = cart.map(ci => ({
-      order_id: order.id,
-      item_id: ci.item.id,
-      qty: ci.qty,
-      price: Number(ci.item.price),
-    }));
+        // The only task is to update the order status from 'Pending Payment' to 'Preparing'.
+        // The order and its items are already in the database.
+        const { error: updateError } = await supabase
+            .from('orders')
+            .update({ status: 'Preparing' })
+            .eq('id', orderId)
+            .eq('status', 'Pending Payment'); // Prevents re-processing a completed order
 
-    const { error: itemErr } = await supabase.from('order_items').insert(itemsPayload);
-    if (itemErr) throw itemErr;
+        if (updateError) {
+            console.error('Webhook Error: Failed to update order status:', orderId, updateError);
+            // Don't throw, as the payment is still successful. Log it for review.
+        }
+    }
 
-    res.json({ success: true, orderId: order.id });
+    res.status(200).send('Webhook received successfully');
   } catch (err) {
-    console.error('Record order error:', err);
-    res.status(500).json({ error: 'Failed to record order' });
+    console.error('Webhook processing error:', err.message);
+    res.status(500).send('Internal Server Error');
   }
 });
 
-app.listen(PORT, () => console.log(`Server running at port ${PORT}`));
+// The '/api/verify-order' endpoint can remain as is, it's a helpful utility.
+app.post('/api/verify-order', async (req, res) => {
+    try {
+      const { orderId } = req.body;
+      if (!orderId) return res.status(400).json({ error: 'Missing orderId' });
+  
+      const response = await axios.get(`${BASE_URL}/orders/${orderId}`, { headers: authHeaders() });
+      res.json({ status: response.data.order_status || 'UNKNOWN' });
+    } catch (error) {
+      console.error('Verify order error:', error.response?.data || error.message);
+      res.status(500).json({ error: 'Verification failed', details: error.response?.data || error.message });
+    }
+  });
+
+app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
