@@ -50,7 +50,7 @@ function computeAmountFromCart(cart) {
   }, 0).toFixed(2);
 }
 
-// 1. Create Order Endpoint (Corrected Logic)
+// 1. Create Order Endpoint
 app.post('/api/create-order', async (req, res) => {
   try {
     const { cart, user } = req.body;
@@ -72,14 +72,14 @@ app.post('/api/create-order', async (req, res) => {
       .single();
 
     if (orderErr) throw orderErr;
-    const newOrderId = newOrder.id; // This is your new, unique UUID
+    const newOrderId = newOrder.id;
 
-    // Step 2: Immediately insert the items into the 'order_items' table.
+    // Step 2: Insert the items into the 'order_items' table.
     const itemsPayload = cart.map(item => ({
         order_id: newOrderId,
-        item_id: item.id, // Assumes your cart item object has an 'id'
-        quantity: item.quantity,
-        price: Number(item.price), // Uses the price from the cart at time of purchase
+        item_id: item.id,
+        qty: item.quantity, // FIX: Changed 'quantity' to 'qty' to match your schema
+        price: Number(item.price),
     }));
 
     const { error: itemErr } = await supabase.from('order_items').insert(itemsPayload);
@@ -107,7 +107,6 @@ app.post('/api/create-order', async (req, res) => {
     const { payment_session_id } = response.data;
 
     if (!payment_session_id) {
-      // If Cashfree fails, you could optionally clean up the order and items here, but it's often left for simplicity.
       return res.status(500).json({ error: 'Failed to create payment session', raw: response.data });
     }
 
@@ -120,11 +119,11 @@ app.post('/api/create-order', async (req, res) => {
     });
   } catch (error) {
     console.error('Create order error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to create order', details: error.response?.data || error.message });
+    res.status(500).json({ error: 'Failed to create order', details: error.response?.data?.message || error.message });
   }
 });
 
-// 2. Cashfree Webhook Endpoint (Simplified Logic)
+// 2. Cashfree Webhook Endpoint
 app.post('/api/cashfree/webhook', express.raw({type: 'application/json'}), async (req, res) => {
   try {
     const signature = req.headers['x-webhook-signature'];
@@ -136,7 +135,6 @@ app.post('/api/cashfree/webhook', express.raw({type: 'application/json'}), async
         return res.status(400).send('Webhook headers missing');
     }
 
-    // Verify the webhook signature
     const verifier = crypto.createHmac('sha256', secret);
     verifier.update(`${timestamp}${payload.toString()}`);
     const generatedSignature = verifier.digest('base64');
@@ -149,21 +147,17 @@ app.post('/api/cashfree/webhook', express.raw({type: 'application/json'}), async
     const eventType = data.type;
     const orderData = data.data.order;
 
-    // We only care about successful payments
     if (eventType === 'PAYMENT_SUCCESS_WEBHOOK' && orderData.order_status === 'PAID') {
         const orderId = orderData.order_id;
 
-        // The only task is to update the order status from 'Pending Payment' to 'Preparing'.
-        // The order and its items are already in the database.
         const { error: updateError } = await supabase
             .from('orders')
             .update({ status: 'Preparing' })
             .eq('id', orderId)
-            .eq('status', 'Pending Payment'); // Prevents re-processing a completed order
+            .eq('status', 'Pending Payment'); 
 
         if (updateError) {
             console.error('Webhook Error: Failed to update order status:', orderId, updateError);
-            // Don't throw, as the payment is still successful. Log it for review.
         }
     }
 
@@ -174,7 +168,7 @@ app.post('/api/cashfree/webhook', express.raw({type: 'application/json'}), async
   }
 });
 
-// The '/api/verify-order' endpoint can remain as is, it's a helpful utility.
+// 3. Verify Order Endpoint
 app.post('/api/verify-order', async (req, res) => {
     try {
       const { orderId } = req.body;
