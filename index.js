@@ -140,7 +140,7 @@ app.post('/api/record-order', async (req, res) => {
     const { data: order, error: orderErr } = await supabase
       .from('orders')
       .insert([{
-        id: cashfreeOrderId,
+        id: orderId,
         user_id: userId,
         user_email: userEmail,
         status: 'Preparing',
@@ -153,7 +153,7 @@ app.post('/api/record-order', async (req, res) => {
 
     // Insert order items
     const itemsPayload = cart.map(ci => ({
-      order_id: cashfreeOrderId,
+      order_id: order.id,
       item_id: ci.item.id,
       qty: ci.qty,
       price: Number(ci.item.price),
