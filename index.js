@@ -45,12 +45,13 @@ function computeAmountFromCart(cart) {
 // Create Cashfree payment order
 app.post('/api/create-order', async (req, res) => {
   try {
-    const { cart, user } = req.body;
+    const { cart, user, amount } = req.body;
     if (!user?.uid) return res.status(400).json({ error: 'Missing user info' });
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Cart is empty' });
 
-    const orderAmount = computeAmountFromCart(cart);
-    if (orderAmount <= 0) return res.status(400).json({ error: 'Invalid cart amount' });
+    const orderAmount = Number(amount);
+  if (isNaN(orderAmount) || orderAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
 
     // Use original string order ID for Cashfree order
     const cashfreeOrderId = 'order_' + Date.now();
