@@ -7,10 +7,8 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Supabase client for admin operations
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// Allow your frontend origin, adjust if needed
 app.use(cors({
   origin: process.env.CORS_ORIGIN || '*'
 }));
@@ -22,7 +20,6 @@ const API_VERSION = "2023-08-01";
 
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 
-// Helper for headers for Cashfree API
 function authHeaders() {
   return {
     'x-client-id': process.env.CASHFREE_CLIENT_ID,
@@ -31,7 +28,6 @@ function authHeaders() {
   };
 }
 
-// Helper to compute order amount from cart
 function computeAmountFromCart(cart) {
   if (!Array.isArray(cart)) return 0;
   return cart.reduce((sum, { price, quantity }) => {
@@ -42,7 +38,6 @@ function computeAmountFromCart(cart) {
   }, 0).toFixed(2);
 }
 
-// Create Cashfree payment order
 app.post('/api/create-order', async (req, res) => {
   try {
     const { cart, user, amount } = req.body;
@@ -53,7 +48,6 @@ app.post('/api/create-order', async (req, res) => {
   if (isNaN(orderAmount) || orderAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
 
-    // Use original string order ID for Cashfree order
     const cashfreeOrderId = 'order_' + Date.now();
 
     const payload = {
@@ -82,7 +76,6 @@ app.post('/api/create-order', async (req, res) => {
       return res.status(500).json({ error: 'No payment_session_id from Cashfree', raw: response.data });
     }
 
-    // Return ONLY the original string order ID for frontend usage
     return res.json({
       orderId: cashfreeOrderId,
       paymentSessionId: payment_session_id,
@@ -96,7 +89,6 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// Verify Cashfree payment order status
 app.post('/api/verify-order', async (req, res) => {
   try {
     const { orderId } = req.body;
@@ -118,7 +110,6 @@ app.post('/api/verify-order', async (req, res) => {
   }
 });
 
-// Record final order and items in Supabase after confirmed payment success
 app.post('/api/record-order', async (req, res) => {
   try {
     const { userId, userEmail, cart, orderId } = req.body;
@@ -126,7 +117,6 @@ app.post('/api/record-order', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Check for duplicate order
     const { data: existingOrder } = await supabase
       .from('orders')
       .select('id')
@@ -137,7 +127,6 @@ app.post('/api/record-order', async (req, res) => {
       return res.status(409).json({ error: 'Order already recorded' });
     }
 
-    // Insert order record with status Completed
     const { data: order, error: orderErr } = await supabase
       .from('orders')
       .insert([{
@@ -152,7 +141,6 @@ app.post('/api/record-order', async (req, res) => {
 
     if (orderErr) throw orderErr;
 
-    // Insert order items
     const itemsPayload = cart.map(ci => ({
       order_id: order.id,
       item_id: ci.item.id,
