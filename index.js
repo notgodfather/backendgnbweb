@@ -22,22 +22,29 @@ const API_VERSION = '2023-08-01';
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 
 // --- IMPORTANT: Webhook route using raw body parser MUST be defined before express.json() ---
-app.post('/api/cashfree/webhook', bodyParser.raw({ type: '*/*' }), async (req, res) => {
-  console.log('--- Webhook Triggered ---');
-  try {
-    const signature = req.headers['x-webhook-signature'] || '';
-    if (!signature) {
-      console.warn('Webhook received but signature is MISSING.');
-      return res.status(200).send('OK');
-    }
-    console.log('Signature header received.');
+// index.js
 
-    const valid = verifyCashfreeSignature(req.body, signature);
-    if (!valid) {
-      console.error('!!! Invalid webhook signature. Halting processing. Check your Webhook Secret. !!!');
-      return res.status(200).send('OK'); // Acknowledge to prevent retries
-    }
-    console.log('Signature is VALID. Processing payload.');
+app.post('/api/cashfree/webhook', bodyParser.raw({ type: '*/*' }), async (req, res) => {
+  console.log('--- Webhook Triggered ---');
+  try {
+    const signature = req.headers['x-webhook-signature'] || '';
+    const timestamp = req.headers['x-webhook-timestamp'] || ''; // <--- NEW: Extract Timestamp
+    
+    if (!signature) {
+      console.warn('Webhook received but signature is MISSING.');
+      return res.status(200).send('OK');
+    }
+    console.log('Signature header received.');
+
+    // <--- CHANGE: Pass the timestamp to the verification function
+    const valid = verifyCashfreeSignature(req.body, signature, timestamp); 
+    
+    if (!valid) {
+      console.error('!!! Invalid webhook signature. Halting processing. Check your Secret Key and Verification Logic. !!!');
+      return res.status(200).send('OK');
+    }
+    console.log('Signature is VALID. Processing payload.');
+    // ... rest of the code is unchanged ...
 
     const payload = JSON.parse(req.body.toString('utf8'));
     console.log('Payload:', JSON.stringify(payload, null, 2));
@@ -112,15 +119,31 @@ function authHeaders() {
   };
 }
 
-function verifyCashfreeSignature(rawBody, signatureHeader) {
-  const secret = process.env.CASHFREE_WEBHOOK_SECRET || '';
-  if (!secret || !signatureHeader) return false;
-  const computed = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signatureHeader));
-  } catch {
-    return false;
-  }
+// index.js
+
+function verifyCashfreeSignature(rawBody, signatureHeader, timestampHeader) {
+  // Use the Client Secret Key as the secret (since you confirmed no separate secret is available)
+  const secret = process.env.CASHFREE_CLIENT_SECRET || ''; 
+  
+  if (!secret || !signatureHeader || !timestampHeader) {
+      return false;
+  }
+  
+  // Cashfree signs the concatenation of timestamp and raw body
+  // Format: timestamp + rawBody (no separator)
+  const signStr = timestampHeader + rawBody.toString('utf8');
+  
+  const computed = crypto.createHmac('sha256', secret)
+      .update(signStr)
+      .digest('base64');
+
+  // Use try-catch for safe comparison
+  try {
+    return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signatureHeader));
+  } catch (e) {
+    // Fallback for timingSafeEqual failure (e.g., length mismatch)
+    return computed === signatureHeader;
+  }
 }
 
 // Routes
