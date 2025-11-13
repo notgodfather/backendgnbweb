@@ -26,18 +26,37 @@ function authHeaders() {
     };
 }
 
-// 🌟 FIX: This route is hit by Cashfree after payment. 
-// It now immediately redirects to the frontend with the order_id.
+// 1. Route to redirect back from Cashfree
 app.get('/pg/return', (req, res) => {
     const { order_id } = req.query;
     if (order_id) {
         // Redirect back to the root of the application, carrying the order_id.
-        // The frontend (Home.jsx) will use this ID to verify and finalize the order.
         res.redirect(`/?order_id=${order_id}`);
     } else {
-        // Fallback if no order_id is present
         res.redirect('/');
     }
+});
+
+// 🌟 CRITICAL FIX: Add a GET route for the root path (/) 
+// to prevent the "Cannot GET /" error after the redirect.
+app.get('/', (req, res) => {
+    // This serves a basic HTML page. If your React app is served from a separate domain, 
+    // this needs to be configured to serve your React app's index.html file.
+    // For now, it prevents the 404 error and allows the browser to load the app with the query parameter.
+    res.status(200).send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Loading Application</title>
+        </head>
+        <body>
+            <h1>Loading...</h1>
+            <p>If your application does not load, please check your frontend configuration.</p>
+        </body>
+        </html>
+    `);
 });
 
 
@@ -64,7 +83,6 @@ app.post('/api/create-order', async (req, res) => {
             },
             order_note: 'College canteen order',
             order_meta: {
-                // Ensure this path is available (it redirects to the front-end now)
                 return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`, 
                 notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`, 
             },
@@ -122,7 +140,6 @@ app.post('/api/record-order', async (req, res) => {
             .single();
 
         if (existingOrder) {
-            // Update status if necessary
             if (existingOrder.status !== 'Success') {
                 await supabase
                     .from('orders')
