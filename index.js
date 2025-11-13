@@ -18,8 +18,7 @@ app.use(cors({
 // ----------------------------------------------------------------------
 // ** CRITICAL FIX: Custom Body Parser for Webhook RAW BODY Access **
 // This global parser handles ALL bodies, saving the raw body (as a string) 
-// into req.rawBody BEFORE parsing it to JSON (req.body). This guarantees 
-// the raw content is available for signature verification.
+// into req.rawBody BEFORE parsing it to JSON (req.body). 
 
 app.use(express.json({
     // Store the raw body buffer as a string in req.rawBody
@@ -163,7 +162,6 @@ app.post('/api/cashfree/webhook', async (req, res) => {
         // 2. Access the already parsed JSON object
         const event = req.body;
         
-        // Ensure the data structure check is correct for the received webhook version
         const { order_id, order_status, cf_payment_id, entity } = event.data?.order || event; 
 
         if (entity !== 'order' || !order_id) {
@@ -193,6 +191,30 @@ app.post('/api/cashfree/webhook', async (req, res) => {
                 return res.status(200).json({ success: true, message: 'Order already processed' });
             }
 
+            // ** CRITICAL ROBUSTNESS CHECK AND ITEM MAPPING **
+            if (!Array.isArray(preOrder.raw_cart_data) || preOrder.raw_cart_data.length === 0) {
+                 console.error(`ERROR: Cannot process order ${order_id}. raw_cart_data is missing or empty.`);
+                 // Update status to mark the issue for manual inspection
+                 await supabase.from('orders').update({ status: 'Failed: Missing Cart Data' }).eq('id', order_id);
+                 return res.status(200).json({ success: false, message: 'Missing cart data' });
+            }
+
+            const itemsPayload = preOrder.raw_cart_data
+                // Filter out any items that might be malformed to prevent the map from crashing
+                .filter(ci => ci && ci.item && ci.item.id) 
+                .map(ci => ({
+                    order_id: order_id,
+                    item_id: ci.item.id,
+                    qty: ci.qty,
+                    price: Number(ci.item.price),
+                }));
+            
+            if (itemsPayload.length === 0) {
+                console.error(`ERROR: Items payload is empty after filtering for order ${order_id}.`);
+                await supabase.from('orders').update({ status: 'Failed: Items Missing IDs' }).eq('id', order_id);
+                return res.status(200).json({ success: false, message: 'Items failed validation' });
+            }
+
             // A. Finalize the main order
             const { error: updateErr } = await supabase
                 .from('orders')
@@ -202,18 +224,11 @@ app.post('/api/cashfree/webhook', async (req, res) => {
                 })
                 .eq('id', order_id);
 
-            if (updateErr) throw updateErr;
+            if (updateErr) throw updateErr; // Throw here, as the critical update failed
             
             // B. Insert order items
-            const itemsPayload = preOrder.raw_cart_data.map(ci => ({
-                order_id: order_id,
-                item_id: ci.item.id,
-                qty: ci.qty,
-                price: Number(ci.item.price),
-            }));
-
             const { error: itemErr } = await supabase.from('order_items').insert(itemsPayload);
-            if (itemErr) throw itemErr;
+            if (itemErr) throw itemErr; // Throw here, as item insertion failed
 
             console.log(`Successfully recorded and finalized order ${order_id}`);
             
@@ -227,11 +242,11 @@ app.post('/api/cashfree/webhook', async (req, res) => {
             if (updateErr) console.error(`Failed to update status for ${order_id} to ${order_status}`);
         }
 
-        // MUST return 200 OK
         return res.status(200).json({ success: true, message: 'Webhook processed' });
 
     } catch (error) {
-        console.error('Cashfree Webhook processing failed:', error.message);
+        // If an exception occurs here (e.g., Supabase update fails), log it and return 200 to Cashfree.
+        console.error('Cashfree Webhook processing FAILED with internal error:', error.message, 'Order ID:', req.body?.data?.order?.order_id || 'N/A');
         res.status(200).json({ success: false, error: 'Internal server error processing webhook' });
     }
 });
