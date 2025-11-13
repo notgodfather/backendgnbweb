@@ -147,6 +147,8 @@ app.post('/api/create-order', async (req, res) => {
 
 app.post('/api/cashfree/webhook', async (req, res) => {
     
+    let preOrder = null; // Declare preOrder here so it's available in the catch block
+
     // Check for empty body (often happens with simple test pings)
     if (!req.rawBody || req.rawBody.length === 0) {
         return res.status(200).json({ success: true, message: 'Test ping or empty body acknowledged.' });
@@ -172,11 +174,13 @@ app.post('/api/cashfree/webhook', async (req, res) => {
         console.log(`Webhook received for Order ID: ${order_id}, Status: ${order_status}`);
 
         // 3. Fetch the pre-recorded order details
-        const { data: preOrder, error: fetchErr } = await supabase
+        const { data: fetchedOrder, error: fetchErr } = await supabase
             .from('orders')
             .select('status, raw_cart_data')
             .eq('id', order_id)
             .single();
+        
+        preOrder = fetchedOrder; // Assign to preOrder for catch block access
 
         if (fetchErr || !preOrder) {
             console.error(`Order ${order_id} not found in DB or fetch error: ${fetchErr?.message}`);
@@ -246,7 +250,20 @@ app.post('/api/cashfree/webhook', async (req, res) => {
 
     } catch (error) {
         // If an exception occurs here (e.g., Supabase update fails), log it and return 200 to Cashfree.
-        console.error('Cashfree Webhook processing FAILED with internal error:', error.message, 'Order ID:', req.body?.data?.order?.order_id || 'N/A');
+        console.error('--- CASHFREE WEBHOOK CRASH LOG START ---');
+        console.error('Internal processing FAILED:', error.message);
+        
+        // Log the JSON data we tried to process, if available
+        if (preOrder && preOrder.raw_cart_data) {
+             console.error('Data that caused crash (first 500 chars):', JSON.stringify(preOrder.raw_cart_data).substring(0, 500) + '...');
+        } else {
+             console.error('Pre-order data was not available or not yet fetched.');
+        }
+        
+        const orderIdInCatch = req.body?.data?.order?.order_id || 'N/A';
+        console.error('Order ID:', orderIdInCatch);
+        console.error('--- CASHFREE WEBHOOK CRASH LOG END ---');
+        
         res.status(200).json({ success: false, error: 'Internal server error processing webhook' });
     }
 });
