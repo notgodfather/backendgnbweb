@@ -1,12 +1,18 @@
+// index.js (Backend - Hosted on Render)
+
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
+// NOTE: path module is removed as we are no longer serving static files.
+// const path = require('path'); 
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// 🌟 CRITICAL CONFIGURATION: Use your Vercel/Frontend Domain 🌟
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000'; // Must be set to 'https://grabngoweb.com' in Render ENV
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
@@ -26,38 +32,21 @@ function authHeaders() {
     };
 }
 
-// 1. Route to redirect back from Cashfree
+// 🌟 THE FIX: Redirects to the Vercel frontend URL 🌟
+// This prevents the "Cannot GET /" error on the backend.
 app.get('/pg/return', (req, res) => {
     const { order_id } = req.query;
     if (order_id) {
-        // Redirect back to the root of the application, carrying the order_id.
-        res.redirect(`/?order_id=${order_id}`);
+        // Redirect to the external frontend domain, carrying the order_id.
+        res.redirect(`${FRONTEND_URL}/?order_id=${order_id}`);
     } else {
-        res.redirect('/');
+        // Fallback: just redirect to the main frontend domain
+        res.redirect(FRONTEND_URL);
     }
 });
 
-// 🌟 CRITICAL FIX: Add a GET route for the root path (/) 
-// to prevent the "Cannot GET /" error after the redirect.
-app.get('/', (req, res) => {
-    // This serves a basic HTML page. If your React app is served from a separate domain, 
-    // this needs to be configured to serve your React app's index.html file.
-    // For now, it prevents the 404 error and allows the browser to load the app with the query parameter.
-    res.status(200).send(`
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Loading Application</title>
-        </head>
-        <body>
-            <h1>Loading...</h1>
-            <p>If your application does not load, please check your frontend configuration.</p>
-        </body>
-        </html>
-    `);
-});
+// REMOVE or IGNORE all general GET routes like app.get('/') and app.get('/*')
+// The backend should only handle /api/* and the /pg/return redirect.
 
 
 app.post('/api/create-order', async (req, res) => {
@@ -83,6 +72,7 @@ app.post('/api/create-order', async (req, res) => {
             },
             order_note: 'College canteen order',
             order_meta: {
+                // Cashfree redirects here (Render domain)
                 return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`, 
                 notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`, 
             },
