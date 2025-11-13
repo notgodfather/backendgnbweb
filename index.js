@@ -1,4 +1,4 @@
-// index.js (FINAL, RELIABLE DEPLOYMENT VERSION with Verification Log)
+// index.js (FINAL, MINIMAL WEBHOOK FIX DEPLOYMENT)
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -20,10 +20,7 @@ app.use(cors({
 }));
 
 // ----------------------------------------------------------------------
-// ** CRITICAL FIX: Custom Body Parser for Webhook RAW BODY Access **
-// This global parser handles ALL bodies, saving the raw body (as a string) 
-// into req.rawBody BEFORE parsing it to JSON (req.body). 
-
+// Custom Body Parser for Webhook RAW BODY Access 
 app.use(express.json({
     // Store the raw body buffer as a string in req.rawBody
     verify: (req, res, buf) => {
@@ -48,11 +45,11 @@ function authHeaders() {
     };
 }
 
-// Helper for Cashfree Webhook Signature Verification - Now uses req.rawBody
+// Helper for Cashfree Webhook Signature Verification
 function verifyCashfreeWebhook(req) {
     const timestamp = req.headers['x-webhook-timestamp'];
     const signature = req.headers['x-webhook-signature'];
-    const rawBody = req.rawBody; // Get raw body saved by the custom parser
+    const rawBody = req.rawBody; 
 
     if (!timestamp || !signature || !rawBody) {
         console.error("Missing required webhook data (Timestamp, Signature, or Raw Body).");
@@ -151,7 +148,7 @@ app.post('/api/create-order', async (req, res) => {
 
 app.post('/api/cashfree/webhook', async (req, res) => {
     
-    let preOrder = null; // Declare preOrder here so it's available in the catch block
+    let preOrder = null; 
 
     // Check for empty body (often happens with simple test pings)
     if (!req.rawBody || req.rawBody.length === 0) {
@@ -160,7 +157,6 @@ app.post('/api/cashfree/webhook', async (req, res) => {
 
     // 1. Verify Signature using the saved raw body
     if (!verifyCashfreeWebhook(req)) {
-        // Must return 200 OK to stop Cashfree retries for security failures
         return res.status(200).json({ status: 'Signature verification failed', message: 'Rejected' });
     }
 
@@ -171,7 +167,6 @@ app.post('/api/cashfree/webhook', async (req, res) => {
         const { order_id, order_status, cf_payment_id, entity } = event.data?.order || event; 
 
         if (entity !== 'order' || !order_id) {
-            // Return 200 OK for irrelevant events
             return res.status(200).json({ error: 'Invalid event structure' });
         }
 
@@ -184,7 +179,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
             .eq('id', order_id)
             .single();
         
-        preOrder = fetchedOrder; // Assign to preOrder for catch block access
+        preOrder = fetchedOrder;
 
         if (fetchErr || !preOrder) {
             console.error(`Order ${order_id} not found in DB or fetch error: ${fetchErr?.message}`);
@@ -199,31 +194,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
                 return res.status(200).json({ success: true, message: 'Order already processed' });
             }
 
-            // ** CRITICAL ROBUSTNESS CHECK AND ITEM MAPPING **
-            if (!Array.isArray(preOrder.raw_cart_data) || preOrder.raw_cart_data.length === 0) {
-                 console.error(`ERROR: Cannot process order ${order_id}. raw_cart_data is missing or empty.`);
-                 // Update status to mark the issue for manual inspection
-                 await supabase.from('orders').update({ status: 'Failed: Missing Cart Data' }).eq('id', order_id);
-                 return res.status(200).json({ success: false, message: 'Missing cart data' });
-            }
-
-            const itemsPayload = preOrder.raw_cart_data
-                // Filter out any items that might be malformed to prevent the map from crashing
-                .filter(ci => ci && ci.item && ci.item.id) 
-                .map(ci => ({
-                    order_id: order_id,
-                    item_id: ci.item.id,
-                    qty: ci.qty,
-                    price: Number(ci.item.price),
-                }));
-            
-            if (itemsPayload.length === 0) {
-                console.error(`ERROR: Items payload is empty after filtering for order ${order_id}.`);
-                await supabase.from('orders').update({ status: 'Failed: Items Missing IDs' }).eq('id', order_id);
-                return res.status(200).json({ success: false, message: 'Items failed validation' });
-            }
-
-            // A. Finalize the main order
+            // A. Finalize the main order (MINIMAL UPDATE)
             const { error: updateErr } = await supabase
                 .from('orders')
                 .update({ 
@@ -232,13 +203,12 @@ app.post('/api/cashfree/webhook', async (req, res) => {
                 })
                 .eq('id', order_id);
 
-            if (updateErr) throw updateErr; // Throw here, as the critical update failed
+            if (updateErr) throw updateErr; 
             
-            // B. Insert order items
-            const { error: itemErr } = await supabase.from('order_items').insert(itemsPayload);
-            if (itemErr) throw itemErr; // Throw here, as item insertion failed
-
-            console.log(`Successfully recorded and finalized order ${order_id}`);
+            // *** IMPORTANT: ITEM INSERTION LOGIC IS TEMPORARILY REMOVED HERE ***
+            // This is to confirm if the crash was ONLY due to the item mapping/insertion logic.
+            
+            console.log(`STATUS UPDATE SUCCESS: Order ${order_id} marked as Preparing (Items not recorded).`);
             
         } else {
             // Update status for FAILED, CANCELLED, etc.
@@ -253,11 +223,10 @@ app.post('/api/cashfree/webhook', async (req, res) => {
         return res.status(200).json({ success: true, message: 'Webhook processed' });
 
     } catch (error) {
-        // If an exception occurs here (e.g., Supabase update fails), log it and return 200 to Cashfree.
+        // If an exception occurs, log the specific crash message.
         console.error('--- CASHFREE WEBHOOK CRASH LOG START ---');
         console.error('Internal processing FAILED:', error.message);
         
-        // Log the JSON data we tried to process, if available
         if (preOrder && preOrder.raw_cart_data) {
              console.error('Data that caused crash (first 500 chars):', JSON.stringify(preOrder.raw_cart_data).substring(0, 500) + '...');
         } else {
