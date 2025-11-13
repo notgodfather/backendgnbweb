@@ -5,14 +5,12 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-// NOTE: path module is removed as we are no longer serving static files.
-// const path = require('path'); 
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// 🌟 CRITICAL CONFIGURATION: Use your Vercel/Frontend Domain 🌟
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000'; // Must be set to 'https://grabngoweb.com' in Render ENV
+// 🌟 CRITICAL CONFIGURATION: Uses the Render environment variable FRONTEND_URL 🌟
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000'; 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
@@ -32,22 +30,16 @@ function authHeaders() {
     };
 }
 
-// 🌟 THE FIX: Redirects to the Vercel frontend URL 🌟
-// This prevents the "Cannot GET /" error on the backend.
+// 🌟 THE FIX: Redirects from the Render backend to the Vercel frontend domain 🌟
 app.get('/pg/return', (req, res) => {
     const { order_id } = req.query;
     if (order_id) {
         // Redirect to the external frontend domain, carrying the order_id.
         res.redirect(`${FRONTEND_URL}/?order_id=${order_id}`);
     } else {
-        // Fallback: just redirect to the main frontend domain
         res.redirect(FRONTEND_URL);
     }
 });
-
-// REMOVE or IGNORE all general GET routes like app.get('/') and app.get('/*')
-// The backend should only handle /api/* and the /pg/return redirect.
-
 
 app.post('/api/create-order', async (req, res) => {
     try {
