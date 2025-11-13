@@ -1,4 +1,4 @@
-// index.js (FINAL, MINIMAL WEBHOOK FIX DEPLOYMENT)
+// index.js — Cashfree PG webhook-hardened backend
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -9,257 +9,189 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// *** DEPLOYMENT VERIFICATION LOG ***
-console.log('--- DEPLOYMENT VERIFICATION: WEBHOOK CATCH FIX v1.2 ACTIVE ---');
-// **********************************
+// Visibility logs
+console.log('Booting GrabNGo backend...');
+console.log('CASHFREE_ENV:', process.env.CASHFREE_ENV);
+console.log('PUBLIC_BASE_URL (must be backend URL):', process.env.PUBLIC_BASE_URL);
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-app.use(cors({
-    origin: process.env.CORS_ORIGIN || '*'
-}));
+app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 
-// ----------------------------------------------------------------------
-// Custom Body Parser for Webhook RAW BODY Access 
+// Capture raw body for webhook signature verification
 app.use(express.json({
-    // Store the raw body buffer as a string in req.rawBody
-    verify: (req, res, buf) => {
-        if (buf && buf.length) {
-            req.rawBody = buf.toString(); 
-        }
-    }
+  verify: (req, res, buf) => { if (buf?.length) req.rawBody = buf.toString(); }
 }));
-// ----------------------------------------------------------------------
 
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
 const API_VERSION = "2023-08-01";
-
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 
+// Cashfree API auth headers
 function authHeaders() {
-    return {
-        'x-client-id': process.env.CASHFREE_CLIENT_ID,
-        'x-client-secret': process.env.CASHFREE_CLIENT_SECRET,
-        'x-api-version': API_VERSION,
-    };
+  return {
+    'x-client-id': process.env.CASHFREE_CLIENT_ID,
+    'x-client-secret': process.env.CASHFREE_CLIENT_SECRET,
+    'x-api-version': API_VERSION,
+  };
 }
 
-// Helper for Cashfree Webhook Signature Verification
+// HMAC verification using webhook secret (NOT client secret)
 function verifyCashfreeWebhook(req) {
-    const timestamp = req.headers['x-webhook-timestamp'];
-    const signature = req.headers['x-webhook-signature'];
-    const rawBody = req.rawBody; 
+  const ts = req.headers['x-webhook-timestamp'];
+  const sig = req.headers['x-webhook-signature'];
+  const raw = req.rawBody;
+  const secret = process.env.CASHFREE_WEBHOOK_SECRET; // set this from Cashfree Dashboard Webhooks
 
-    if (!timestamp || !signature || !rawBody) {
-        console.error("Missing required webhook data (Timestamp, Signature, or Raw Body).");
-        return false;
-    }
+  if (!ts || !sig || !raw || !secret) {
+    console.error('Webhook verify missing ts/sig/raw/secret');
+    return false;
+  }
 
-    const secretKey = process.env.CASHFREE_CLIENT_SECRET;
-    const signStr = timestamp + rawBody;
-
-    try {
-        const generatedSignature = crypto.createHmac('sha256', secretKey)
-            .update(signStr)
-            .digest('base64');
-        
-        if (generatedSignature !== signature) {
-            console.error("Webhook signature mismatch!");
-            return false;
-        }
-        return true;
-    } catch (e) {
-        console.error("Error during signature verification:", e.message);
-        return false;
-    }
+  const signedPayload = ts + raw;
+  const expected = crypto.createHmac('sha256', secret).update(signedPayload).digest('base64');
+  const ok = expected === sig;
+  if (!ok) console.error('Webhook signature mismatch');
+  return ok;
 }
 
-// --- API Endpoints ---
-
+// Create Cashfree order and (optionally) pre-record local order
 app.post('/api/create-order', async (req, res) => {
-    try {
-        const { cart, user, amount } = req.body;
-        if (!user?.uid) return res.status(400).json({ error: 'Missing user info' });
-        if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Cart is empty' });
+  try {
+    const { cart, user, amount } = req.body;
+    if (!user?.uid) return res.status(400).json({ error: 'Missing user info' });
+    if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Cart is empty' });
 
-        const orderAmount = Number(amount);
-        if (isNaN(orderAmount) || orderAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+    const orderAmount = Number(amount);
+    if (isNaN(orderAmount) || orderAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
-        const cashfreeOrderId = 'order_' + Date.now();
+    const cashfreeOrderId = 'order_' + Date.now();
 
-        // Pre-record the order with PENDING status and data
-        const { error: preRecordErr } = await supabase
-            .from('orders')
-            .insert([{
-                id: cashfreeOrderId,
-                user_id: user.uid,
-                user_email: user.email,
-                status: 'Pending Payment', 
-                total_amount: orderAmount,
-                raw_cart_data: cart,
-            }])
-            .select('id');
-
-        if (preRecordErr) {
-            console.error('Supabase pre-record error:', preRecordErr);
-            return res.status(500).json({ error: 'Failed to pre-record order' });
-        }
-        
-        const payload = {
-            order_id: cashfreeOrderId,
-            order_amount: orderAmount,
-            order_currency: 'INR',
-            customer_details: {
-                customer_id: user.uid,
-                customer_name: user.displayName || 'Guest',
-                customer_email: user.email || 'noemail@example.com',
-                customer_phone: user.phoneNumber || '9999999999',
-            },
-            order_note: 'College canteen order',
-            order_meta: {
-                return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`,
-                notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`,
-            },
-        };
-
-        const response = await axios.post(`${BASE_URL}/orders`, payload, { headers: authHeaders() });
-        const { payment_session_id } = response.data;
-
-        console.log('Create order response from Cashfree:', response.data);
-
-        if (!payment_session_id) {
-            return res.status(500).json({ error: 'No payment_session_id from Cashfree', raw: response.data });
-        }
-
-        return res.json({
-            orderId: cashfreeOrderId,
-            paymentSessionId: payment_session_id,
-            amount: orderAmount,
-            currency: 'INR',
-            envMode: isSandbox ? 'sandbox' : 'production',
-        });
-    } catch (error) {
-        console.error('Create order error:', error.response?.data || error.message);
-        res.status(500).json({ error: 'Create order failed', details: error.response?.data || error.message });
+    // Pre-record as Pending Payment (idempotent-friendly: ignore error if duplicate)
+    const { error: preErr } = await supabase.from('orders').insert([{
+      id: cashfreeOrderId,
+      user_id: user.uid,
+      user_email: user.email || null,
+      status: 'Pending Payment',
+      total_amount: orderAmount,
+      raw_cart_data: cart, // jsonb column recommended
+      created_at: new Date().toISOString()
+    }]);
+    if (preErr && preErr.code !== '23505') { // ignore duplicate PK errors
+      console.error('Pre-record order error:', preErr);
+      // continue; do not block checkout for a pre-insert failure
     }
+
+    const payload = {
+      order_id: cashfreeOrderId,
+      order_amount: orderAmount,
+      order_currency: 'INR',
+      customer_details: {
+        customer_id: user.uid,
+        customer_name: user.displayName || 'Guest',
+        customer_email: user.email || 'noemail@example.com',
+        customer_phone: user.phoneNumber || '9999999999',
+      },
+      order_note: 'College canteen order',
+      order_meta: {
+        // Cashfree may redirect; ensure this is acceptable, but modal should keep user in-app
+        return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`,
+        notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`, // MUST be backend URL
+      },
+    };
+
+    const cfResp = await axios.post(`${BASE_URL}/orders`, payload, { headers: authHeaders() });
+    const { payment_session_id } = cfResp.data;
+    if (!payment_session_id) return res.status(500).json({ error: 'No payment_session_id from Cashfree' });
+
+    return res.json({
+      orderId: cashfreeOrderId,
+      paymentSessionId: payment_session_id,
+      amount: orderAmount,
+      currency: 'INR',
+      envMode: isSandbox ? 'sandbox' : 'production',
+    });
+  } catch (error) {
+    console.error('Create order error:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Create order failed', details: error.response?.data || error.message });
+  }
 });
 
-
-// index.js (Simplified /api/cashfree/webhook function)
-
+// Webhook handler: updates order status based on Cashfree events
 app.post('/api/cashfree/webhook', async (req, res) => {
-    
-    let preOrder = null; 
-
-    // Check for empty body (often happens with simple test pings)
-    if (!req.rawBody || req.rawBody.length === 0) {
-        return res.status(200).json({ success: true, message: 'Test ping or empty body acknowledged.' });
-    }
-
-    // 1. Verify Signature using the saved raw body
+  try {
     if (!verifyCashfreeWebhook(req)) {
-        return res.status(200).json({ status: 'Signature verification failed', message: 'Rejected' });
+      // Return 200 to avoid retries storm, but log failure
+      console.error('Webhook verification failed; ignoring event');
+      return res.status(200).json({ ok: false });
     }
 
-    try {
-        // 2. Access the already parsed JSON object
-        const event = req.body;
-        
-        const { order_id, order_status, cf_payment_id, entity } = event.data?.order || event; 
+    const payload = req.body || {};
+    // Defensive extraction across versions
+    const orderObj = payload.data?.order || payload.data?.object || payload.order || payload;
+    const order_id = orderObj?.order_id || orderObj?.id;
+    const rawStatus = orderObj?.order_status || orderObj?.status || '';
+    const cf_payment_id = orderObj?.cf_payment_id || orderObj?.payment_id || null;
+    const s = String(rawStatus).toUpperCase();
 
-        if (entity !== 'order' || !order_id) {
-            return res.status(200).json({ error: 'Invalid event structure' });
-        }
-
-        console.log(`Webhook received for Order ID: ${order_id}, Status: ${order_status}`);
-
-        // 3. Fetch only the current status for idempotency check (CRITICAL SIMPLIFICATION)
-        const { data: fetchedOrder, error: fetchErr } = await supabase
-            .from('orders')
-            .select('status')
-            .eq('id', order_id)
-            .single();
-        
-        preOrder = fetchedOrder;
-
-        if (fetchErr || !preOrder) {
-            console.error(`Order ${order_id} not found in DB or fetch error: ${fetchErr?.message}`);
-            return res.status(200).json({ success: true, message: 'Order not found in DB' });
-        }
-        
-        // 4. Process the PAID status
-        if (order_status === 'PAID' || order_status === 'SUCCESS') {
-            
-            if (preOrder.status !== 'Pending Payment') {
-                console.log(`Order ${order_id} already processed.`);
-                return res.status(200).json({ success: true, message: 'Order already processed' });
-            }
-
-            // A. Finalize the main order (MINIMAL UPDATE)
-            // We use .toString() on payment_id just in case it's numeric/null
-            const { error: updateErr } = await supabase
-                .from('orders')
-                .update({ 
-                    status: 'Preparing', 
-                    payment_id: (cf_payment_id || 'N/A').toString(), 
-                })
-                .eq('id', order_id);
-
-            if (updateErr) throw updateErr; 
-            
-            console.log(`STATUS UPDATE SUCCESS: Order ${order_id} marked as Preparing (Items not recorded).`);
-            
-        } else {
-            // Update status for FAILED, CANCELLED, etc.
-            const { error: updateErr } = await supabase
-                .from('orders')
-                .update({ status: order_status }) 
-                .eq('id', order_id);
-            
-            if (updateErr) console.error(`Failed to update status for ${order_id} to ${order_status}`);
-        }
-
-        return res.status(200).json({ success: true, message: 'Webhook processed' });
-
-    } catch (error) {
-        // Log the specific crash message.
-        console.error('--- CASHFREE WEBHOOK CRASH LOG START ---');
-        console.error('Internal processing FAILED:', error.message);
-        
-        const orderIdInCatch = req.body?.data?.order?.order_id || 'N/A';
-        console.error('Order ID:', orderIdInCatch);
-        console.error('--- CASHFREE WEBHOOK CRASH LOG END ---');
-        
-        res.status(200).json({ success: false, error: 'Internal server error processing webhook' });
+    if (!order_id) {
+      console.error('Webhook missing order_id; payload:', JSON.stringify(payload));
+      return res.status(200).json({ ok: true });
     }
+
+    const successStatuses = ['PAID','SUCCESS','CHARGED','CAPTURED'];
+
+    // Ensure row exists; if not, create minimal row
+    const { data: dbOrder, error: fetchErr } = await supabase
+      .from('orders').select('id,status').eq('id', order_id).single();
+
+    if (fetchErr) {
+      console.warn('Order fetch on webhook failed; attempting insert:', fetchErr?.message);
+      await supabase.from('orders').insert([{ id: order_id, status: successStatuses.includes(s) ? 'Preparing' : s }]);
+      return res.status(200).json({ ok: true });
+    }
+
+    if (successStatuses.includes(s)) {
+      if (dbOrder.status !== 'Preparing' && dbOrder.status !== 'Success') {
+        const { error: updErr } = await supabase.from('orders')
+          .update({ status: 'Preparing', payment_id: cf_payment_id ? String(cf_payment_id) : null })
+          .eq('id', order_id);
+        if (updErr) console.error('DB update to Preparing failed:', updErr);
+      }
+    } else {
+      const { error: updErr } = await supabase.from('orders')
+        .update({ status: s })
+        .eq('id', order_id);
+      if (updErr) console.error('DB update to non-success status failed:', updErr);
+    }
+
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('Webhook handler crash:', err.message);
+    // Still return 200 to prevent endless retries; log for investigation
+    return res.status(200).json({ ok: false });
+  }
 });
 
-
+// Verify endpoint: prefer DB, fallback to Cashfree
 app.post('/api/verify-order', async (req, res) => {
-    try {
-        const { orderId } = req.body;
-        if (!orderId) return res.status(400).json({ error: 'Missing orderId' });
+  try {
+    const { orderId } = req.body;
+    if (!orderId) return res.status(400).json({ error: 'Missing orderId' });
 
-        // Prefer checking our DB first
-        const { data: order, error: dbErr } = await supabase
-            .from('orders')
-            .select('status')
-            .eq('id', orderId)
-            .single();
+    const { data: order, error: dbErr } = await supabase
+      .from('orders').select('status').eq('id', orderId).single();
 
-        if (dbErr || !order) {
-             // Fallback to Cashfree API
-             const response = await axios.get(`${BASE_URL}/orders/${orderId}`, { headers: authHeaders() });
-             const status = response.data.order_status || 'UNKNOWN';
-             return res.json({ status });
-        }
+    if (!dbErr && order) return res.json({ status: order.status });
 
-        res.json({ status: order.status });
-    } catch (error) {
-        console.error('Verify order error:', error.response?.data || error.message);
-        res.status(500).json({ error: 'Verify failed', details: error.response?.data || error.message });
-    }
+    const response = await axios.get(`${BASE_URL}/orders/${orderId}`, { headers: authHeaders() });
+    const status = response.data?.order_status || 'UNKNOWN';
+    return res.json({ status });
+  } catch (error) {
+    console.error('Verify order error:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Verify failed', details: error.response?.data || error.message });
+  }
 });
 
 app.listen(PORT, () => console.log(`Server running at port ${PORT}`));
