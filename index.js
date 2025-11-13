@@ -146,6 +146,8 @@ app.post('/api/create-order', async (req, res) => {
 });
 
 
+// index.js (Simplified /api/cashfree/webhook function)
+
 app.post('/api/cashfree/webhook', async (req, res) => {
     
     let preOrder = null; 
@@ -172,10 +174,10 @@ app.post('/api/cashfree/webhook', async (req, res) => {
 
         console.log(`Webhook received for Order ID: ${order_id}, Status: ${order_status}`);
 
-        // 3. Fetch the pre-recorded order details
+        // 3. Fetch only the current status for idempotency check (CRITICAL SIMPLIFICATION)
         const { data: fetchedOrder, error: fetchErr } = await supabase
             .from('orders')
-            .select('status, raw_cart_data')
+            .select('status')
             .eq('id', order_id)
             .single();
         
@@ -195,18 +197,16 @@ app.post('/api/cashfree/webhook', async (req, res) => {
             }
 
             // A. Finalize the main order (MINIMAL UPDATE)
+            // We use .toString() on payment_id just in case it's numeric/null
             const { error: updateErr } = await supabase
                 .from('orders')
                 .update({ 
                     status: 'Preparing', 
-                    payment_id: cf_payment_id || 'N/A', 
+                    payment_id: (cf_payment_id || 'N/A').toString(), 
                 })
                 .eq('id', order_id);
 
             if (updateErr) throw updateErr; 
-            
-            // *** IMPORTANT: ITEM INSERTION LOGIC IS TEMPORARILY REMOVED HERE ***
-            // This is to confirm if the crash was ONLY due to the item mapping/insertion logic.
             
             console.log(`STATUS UPDATE SUCCESS: Order ${order_id} marked as Preparing (Items not recorded).`);
             
@@ -223,15 +223,9 @@ app.post('/api/cashfree/webhook', async (req, res) => {
         return res.status(200).json({ success: true, message: 'Webhook processed' });
 
     } catch (error) {
-        // If an exception occurs, log the specific crash message.
+        // Log the specific crash message.
         console.error('--- CASHFREE WEBHOOK CRASH LOG START ---');
         console.error('Internal processing FAILED:', error.message);
-        
-        if (preOrder && preOrder.raw_cart_data) {
-             console.error('Data that caused crash (first 500 chars):', JSON.stringify(preOrder.raw_cart_data).substring(0, 500) + '...');
-        } else {
-             console.error('Pre-order data was not available or not yet fetched.');
-        }
         
         const orderIdInCatch = req.body?.data?.order?.order_id || 'N/A';
         console.error('Order ID:', orderIdInCatch);
