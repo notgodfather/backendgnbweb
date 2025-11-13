@@ -26,32 +26,18 @@ function authHeaders() {
     };
 }
 
-// 🐛 FIX: Add a GET route for /pg/return to prevent the "Cannot GET" error 
-// when Cashfree redirects the user's browser after payment completion.
+// 🌟 FIX: This route is hit by Cashfree after payment. 
+// It now immediately redirects to the frontend with the order_id.
 app.get('/pg/return', (req, res) => {
-    // Since the actual verification is handled by the front-end (Home.jsx) 
-    // after the Cashfree SDK signals success, this route just needs to return a valid page.
-    res.status(200).send(`
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Payment Processing</title>
-            <style>
-                body { font-family: sans-serif; text-align: center; padding: 50px; background-color: #f8fafc; color: #1e293b; }
-                h1 { color: #22c55e; }
-                .spinner { border: 4px solid rgba(0, 0, 0, 0.1); border-top: 4px solid #22c55e; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
-                @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-            </style>
-        </head>
-        <body>
-            <div class="spinner"></div>
-            <h1>Verifying Payment...</h1>
-            <p>Please wait a moment while we confirm your order. You can safely close this window if the main application window has updated.</p>
-        </body>
-        </html>
-    `);
+    const { order_id } = req.query;
+    if (order_id) {
+        // Redirect back to the root of the application, carrying the order_id.
+        // The frontend (Home.jsx) will use this ID to verify and finalize the order.
+        res.redirect(`/?order_id=${order_id}`);
+    } else {
+        // Fallback if no order_id is present
+        res.redirect('/');
+    }
 });
 
 
@@ -78,7 +64,7 @@ app.post('/api/create-order', async (req, res) => {
             },
             order_note: 'College canteen order',
             order_meta: {
-                // Ensure this path is available (now it is, via the new app.get('/pg/return') above)
+                // Ensure this path is available (it redirects to the front-end now)
                 return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`, 
                 notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`, 
             },
