@@ -1,4 +1,4 @@
-// index.js (FINAL, RELIABLE DEPLOYMENT VERSION)
+// index.js (FINAL, RELIABLE DEPLOYMENT VERSION with Verification Log)
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -8,6 +8,10 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// *** DEPLOYMENT VERIFICATION LOG ***
+console.log('--- DEPLOYMENT VERIFICATION: WEBHOOK CATCH FIX v1.2 ACTIVE ---');
+// **********************************
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
