@@ -1,4 +1,4 @@
-// index.js (FINAL FIX: Ensuring correct body parsing for Webhook)
+// index.js (FINAL, RELIABLE DEPLOYMENT VERSION)
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -9,21 +9,27 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Supabase client setup
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 app.use(cors({
     origin: process.env.CORS_ORIGIN || '*'
 }));
 
-// --- PARSERS SETUP ---
-// Define the standard JSON parser for *most* API routes
-const jsonParser = express.json();
+// ----------------------------------------------------------------------
+// ** CRITICAL FIX: Custom Body Parser for Webhook RAW BODY Access **
+// This global parser handles ALL bodies, saving the raw body (as a string) 
+// into req.rawBody BEFORE parsing it to JSON (req.body). This guarantees 
+// the raw content is available for signature verification.
 
-// Define a RAW BODY parser specifically for the Webhook to get the body string for signature verification
-// We must get the raw body as a Buffer, convert it to a string, and then parse it manually.
-const rawBodyParser = express.text({ type: '*/*' }); 
-// ----------------------
+app.use(express.json({
+    // Store the raw body buffer as a string in req.rawBody
+    verify: (req, res, buf) => {
+        if (buf && buf.length) {
+            req.rawBody = buf.toString(); 
+        }
+    }
+}));
+// ----------------------------------------------------------------------
 
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
@@ -39,18 +45,19 @@ function authHeaders() {
     };
 }
 
-// Helper for Cashfree Webhook Signature Verification
-function verifyCashfreeWebhook(req, rawBody) { // Accepts rawBody as argument
+// Helper for Cashfree Webhook Signature Verification - Now uses req.rawBody
+function verifyCashfreeWebhook(req) {
     const timestamp = req.headers['x-webhook-timestamp'];
     const signature = req.headers['x-webhook-signature'];
+    const rawBody = req.rawBody; // Get raw body saved by the custom parser
 
-    if (!timestamp || !signature) {
-        console.error("Missing webhook headers.");
+    if (!timestamp || !signature || !rawBody) {
+        console.error("Missing required webhook data (Timestamp, Signature, or Raw Body).");
         return false;
     }
 
     const secretKey = process.env.CASHFREE_CLIENT_SECRET;
-    const signStr = timestamp + rawBody; // Use the raw body string
+    const signStr = timestamp + rawBody;
 
     try {
         const generatedSignature = crypto.createHmac('sha256', secretKey)
@@ -70,7 +77,7 @@ function verifyCashfreeWebhook(req, rawBody) { // Accepts rawBody as argument
 
 // --- API Endpoints ---
 
-app.post('/api/create-order', jsonParser, async (req, res) => {
+app.post('/api/create-order', async (req, res) => {
     try {
         const { cart, user, amount } = req.body;
         if (!user?.uid) return res.status(400).json({ error: 'Missing user info' });
@@ -81,7 +88,7 @@ app.post('/api/create-order', jsonParser, async (req, res) => {
 
         const cashfreeOrderId = 'order_' + Date.now();
 
-        // ** CRITICAL CHANGE: Pre-record the order with PENDING status and data **
+        // Pre-record the order with PENDING status and data
         const { error: preRecordErr } = await supabase
             .from('orders')
             .insert([{
@@ -139,26 +146,29 @@ app.post('/api/create-order', jsonParser, async (req, res) => {
 });
 
 
-app.post('/api/cashfree/webhook', rawBodyParser, async (req, res) => {
+app.post('/api/cashfree/webhook', async (req, res) => {
     
-    // ** CRITICAL FIX **: Get the raw body string from the request.
-    const rawBodyString = req.body;
-    
-    // 1. Verify Signature
-    if (!verifyCashfreeWebhook(req, rawBodyString)) {
-        // Log the failure, but return 200 OK to stop retries if the body was invalid
+    // Check for empty body (often happens with simple test pings)
+    if (!req.rawBody || req.rawBody.length === 0) {
+        return res.status(200).json({ success: true, message: 'Test ping or empty body acknowledged.' });
+    }
+
+    // 1. Verify Signature using the saved raw body
+    if (!verifyCashfreeWebhook(req)) {
+        // Must return 200 OK to stop Cashfree retries for security failures
         return res.status(200).json({ status: 'Signature verification failed', message: 'Rejected' });
     }
 
     try {
-        // 2. Parse the verified raw body string into a JSON event object
-        const event = JSON.parse(rawBodyString);
+        // 2. Access the already parsed JSON object
+        const event = req.body;
         
-        // Structure check (adjust based on actual Cashfree event structure)
+        // Ensure the data structure check is correct for the received webhook version
         const { order_id, order_status, cf_payment_id, entity } = event.data?.order || event; 
 
         if (entity !== 'order' || !order_id) {
-            return res.status(400).json({ error: 'Invalid event structure' });
+            // Return 200 OK for irrelevant events
+            return res.status(200).json({ error: 'Invalid event structure' });
         }
 
         console.log(`Webhook received for Order ID: ${order_id}, Status: ${order_status}`);
@@ -179,7 +189,7 @@ app.post('/api/cashfree/webhook', rawBodyParser, async (req, res) => {
         if (order_status === 'PAID' || order_status === 'SUCCESS') {
             
             if (preOrder.status !== 'Pending Payment') {
-                console.log(`Order ${order_id} already processed. Current status: ${preOrder.status}`);
+                console.log(`Order ${order_id} already processed.`);
                 return res.status(200).json({ success: true, message: 'Order already processed' });
             }
 
@@ -194,7 +204,7 @@ app.post('/api/cashfree/webhook', rawBodyParser, async (req, res) => {
 
             if (updateErr) throw updateErr;
             
-            // B. Insert order items using the stored raw_cart_data
+            // B. Insert order items
             const itemsPayload = preOrder.raw_cart_data.map(ci => ({
                 order_id: order_id,
                 item_id: ci.item.id,
@@ -208,7 +218,7 @@ app.post('/api/cashfree/webhook', rawBodyParser, async (req, res) => {
             console.log(`Successfully recorded and finalized order ${order_id}`);
             
         } else {
-            // Update order status for FAILED, CANCELLED, etc.
+            // Update status for FAILED, CANCELLED, etc.
             const { error: updateErr } = await supabase
                 .from('orders')
                 .update({ status: order_status }) 
@@ -217,18 +227,17 @@ app.post('/api/cashfree/webhook', rawBodyParser, async (req, res) => {
             if (updateErr) console.error(`Failed to update status for ${order_id} to ${order_status}`);
         }
 
-        // Return 200 OK
+        // MUST return 200 OK
         return res.status(200).json({ success: true, message: 'Webhook processed' });
 
     } catch (error) {
         console.error('Cashfree Webhook processing failed:', error.message);
-        // Ensure to return 200 OK even if internal processing failed
         res.status(200).json({ success: false, error: 'Internal server error processing webhook' });
     }
 });
 
 
-app.post('/api/verify-order', jsonParser, async (req, res) => {
+app.post('/api/verify-order', async (req, res) => {
     try {
         const { orderId } = req.body;
         if (!orderId) return res.status(400).json({ error: 'Missing orderId' });
@@ -241,7 +250,7 @@ app.post('/api/verify-order', jsonParser, async (req, res) => {
             .single();
 
         if (dbErr || !order) {
-             // Fallback to Cashfree API if our DB is slow or data is missing
+             // Fallback to Cashfree API
              const response = await axios.get(`${BASE_URL}/orders/${orderId}`, { headers: authHeaders() });
              const status = response.data.order_status || 'UNKNOWN';
              return res.json({ status });
