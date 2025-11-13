@@ -9,9 +9,7 @@ const PORT = process.env.PORT || 5000;
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*'
-}));
+app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(express.json());
 
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
@@ -28,16 +26,6 @@ function authHeaders() {
   };
 }
 
-function computeAmountFromCart(cart) {
-  if (!Array.isArray(cart)) return 0;
-  return cart.reduce((sum, { price, quantity }) => {
-    const p = Number(price);
-    const q = Number(quantity);
-    if (isNaN(p) || isNaN(q) || p < 0 || q < 0) throw new Error("Invalid price or quantity");
-    return sum + p * q;
-  }, 0).toFixed(2);
-}
-
 app.post('/api/create-order', async (req, res) => {
   try {
     const { cart, user, amount } = req.body;
@@ -45,8 +33,7 @@ app.post('/api/create-order', async (req, res) => {
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Cart is empty' });
 
     const orderAmount = Number(amount);
-  if (isNaN(orderAmount) || orderAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-
+    if (isNaN(orderAmount) || orderAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
     const cashfreeOrderId = 'order_' + Date.now();
 
@@ -63,14 +50,12 @@ app.post('/api/create-order', async (req, res) => {
       order_note: 'College canteen order',
       order_meta: {
         return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`,
-        notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`,
+        notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`, // you can keep or remove if no webhook
       },
     };
 
     const response = await axios.post(`${BASE_URL}/orders`, payload, { headers: authHeaders() });
     const { payment_session_id } = response.data;
-
-    console.log('Create order response from Cashfree:', response.data);
 
     if (!payment_session_id) {
       return res.status(500).json({ error: 'No payment_session_id from Cashfree', raw: response.data });
@@ -92,14 +77,10 @@ app.post('/api/create-order', async (req, res) => {
 app.post('/api/verify-order', async (req, res) => {
   try {
     const { orderId } = req.body;
-    console.log('Verifying order with ID:', orderId);
-
     if (!orderId) return res.status(400).json({ error: 'Missing orderId' });
 
     const response = await axios.get(`${BASE_URL}/orders/${orderId}`, { headers: authHeaders() });
     const data = response.data;
-
-    console.log('Verify order response from Cashfree:', data);
 
     const status = data.order_status || 'UNKNOWN';
 
@@ -117,23 +98,32 @@ app.post('/api/record-order', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Check if order already recorded
     const { data: existingOrder } = await supabase
       .from('orders')
-      .select('id')
+      .select('id, status')
       .eq('id', orderId)
       .single();
 
     if (existingOrder) {
-      return res.status(409).json({ error: 'Order already recorded' });
+      // Update status if necessary
+      if (existingOrder.status !== 'Success') {
+        await supabase
+          .from('orders')
+          .update({ status: 'Success' })
+          .eq('id', orderId);
+      }
+      return res.status(200).json({ success: true, message: 'Order already recorded', orderId: existingOrder.id });
     }
 
+    // Insert order
     const { data: order, error: orderErr } = await supabase
       .from('orders')
       .insert([{
         id: orderId,
         user_id: userId,
         user_email: userEmail,
-        status: 'Preparing',
+        status: 'Success',
         created_at: new Date().toISOString(),
       }])
       .select('id')
@@ -141,6 +131,7 @@ app.post('/api/record-order', async (req, res) => {
 
     if (orderErr) throw orderErr;
 
+    // Prepare items payload
     const itemsPayload = cart.map(ci => ({
       order_id: order.id,
       item_id: ci.item.id,
