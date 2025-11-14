@@ -155,8 +155,6 @@ app.post('/api/finalize-order', async (req, res) => {
       order_id: order.id,
       item_id: ci.item.id,
       qty: ci.qty,
-      // Record original price in DB, or use the discounted price depending on your reporting needs.
-      // We'll record the discounted price here, as it matches the order total.
       price: Math.max(0, Number(ci.item.price) - FLAT_ITEM_DISCOUNT), 
     }));
 
