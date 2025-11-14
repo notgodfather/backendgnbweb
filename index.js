@@ -1,5 +1,3 @@
-// index.js
-
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -11,28 +9,19 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Supabase service role client (server-only)
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
-); // server-only key [web:12]
+);
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
-
-// Raw body ONLY for webhook route (to verify HMAC on exact bytes)
 app.use('/api/cashfree/webhook', bodyParser.raw({ type: '*/*' }));
-
-// JSON for all other routes
 app.use(express.json());
 
-// Cashfree config
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
 const API_VERSION = '2023-08-01';
-
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
-
-// Match client discount logic
 const FLAT_ITEM_DISCOUNT = 5.0;
 
 function authHeaders() {
@@ -47,7 +36,6 @@ app.get('/health', (_req, res) =>
   res.json({ ok: true, env: isSandbox ? 'sandbox' : 'production' })
 );
 
-// ---------- Create Cashfree order and cache pending snapshot ----------
 app.post('/api/create-order', async (req, res) => {
   try {
     const { cart, user, amount } = req.body;
@@ -82,13 +70,12 @@ app.post('/api/create-order', async (req, res) => {
       return res.status(500).json({ error: 'No payment_session_id from Cashfree', raw: cfResp.data });
     }
 
-    // Cache pending snapshot for webhook reconstruction
     const snapshot = {
       id: cashfreeOrderId,
       user_id: user.uid,
       user_email: user.email || 'noemail@example.com',
       amount: orderAmount,
-      cart: cart, // JSONB
+      cart: cart,
       created_at: new Date().toISOString(),
     };
     const { error: pendErr } = await supabase.from('pending_orders').upsert([snapshot]);
@@ -107,21 +94,15 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// ---------- Webhook: verify, idempotent, reconcile items if needed ----------
+// ----- THE MAIN WEBHOOK -----
 app.post('/api/cashfree/webhook', async (req, res) => {
   try {
     const timestamp = req.header('x-webhook-timestamp');
     const signature = req.header('x-webhook-signature');
-    const raw = req.body; // Buffer
-    const payloadStr = raw.toString('utf8');
-
-    // Verify signature: Base64(HMAC_SHA256(timestamp + rawBody, client secret))
-    const expected = crypto
-      .createHmac('sha256', process.env.CASHFREE_CLIENT_SECRET)
-      .update(timestamp + payloadStr)
-      .digest('base64');
+    const payloadStr = req.body.toString('utf8');
+    const expected = crypto.createHmac('sha256', process.env.CASHFREE_CLIENT_SECRET)
+      .update(timestamp + payloadStr).digest('base64');
     if (!signature || expected !== signature) {
-      console.warn('Invalid webhook signature');
       return res.status(400).send('Invalid signature');
     }
 
@@ -129,16 +110,13 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     const data = event.data || {};
     const order = data.order || {};
     const payment = data.payment || {};
-
     const orderId = order.order_id;
     const paymentId = String(payment.cf_payment_id || '');
     const payStatus = payment.payment_status;
 
-    if (payStatus !== 'SUCCESS') {
-      return res.status(200).send('Ignored non-success');
-    }
+    if (payStatus !== 'SUCCESS') return res.status(200).send('Ignored non-success');
 
-    // 1) Payments upsert (idempotent by cf_payment_id)
+    // payments upsert
     const payRow = {
       cf_payment_id: paymentId,
       order_id: orderId,
@@ -149,56 +127,47 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     const { error: payErr } = await supabase
       .from('payments')
       .upsert([payRow], { onConflict: 'cf_payment_id', ignoreDuplicates: true });
-    if (payErr) return res.status(500).send('Payments upsert failed'); // retry
+    if (payErr) return res.status(500).send('Payments upsert failed');
 
-    // 2) If order header exists, reconcile items if missing
+    // check existing order
     const { data: existingOrder } = await supabase
-      .from('orders')
-      .select('id')
-      .eq('id', orderId)
-      .maybeSingle();
+      .from('orders').select('id').eq('id', orderId).maybeSingle();
 
     if (existingOrder) {
+      // check items
       const { count, error: itemsCountErr } = await supabase
         .from('order_items')
         .select('id', { count: 'exact', head: true })
         .eq('order_id', orderId);
-      if (itemsCountErr) return res.status(500).send('Order items count failed'); // retry
+      if (itemsCountErr) return res.status(500).send('Order items count failed');
 
       if ((count || 0) === 0) {
-        // Need pending snapshot to rebuild items
+        // must build items from pending
         const { data: pending, error: pendGetErr } = await supabase
-          .from('pending_orders')
-          .select('*')
-          .eq('id', orderId)
-          .maybeSingle();
-        if (pendGetErr) return res.status(500).send('Pending fetch failed'); // retry
-        if (!pending) return res.status(500).send('No pending for reconciliation'); // retry
+          .from('pending_orders').select('*').eq('id', orderId).maybeSingle();
+        if (pendGetErr) return res.status(500).send('Pending fetch failed');
+        if (!pending) return res.status(500).send('No pending for reconciliation');
 
         const cart = Array.isArray(pending.cart) ? pending.cart : pending.cart || [];
-        const itemsPayload = cart.map((ci) => ({
+        const itemsPayload = cart.map(ci => ({
           order_id: orderId,
           item_id: ci.item.id,
           qty: ci.qty,
           price: Math.max(0, Number(ci.item.price) - FLAT_ITEM_DISCOUNT),
         }));
         const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
-        if (itemsErr) return res.status(500).send('Order items reconcile failed'); // retry
+        if (itemsErr) return res.status(500).send('Order items reconcile failed');
 
         await supabase.from('pending_orders').delete().eq('id', orderId);
       }
-
       return res.status(200).send('Order already exists');
     }
 
-    // 3) Fresh order path: require pending first
+    // must build order+items from pending
     const { data: pending, error: pendGetErr } = await supabase
-      .from('pending_orders')
-      .select('*')
-      .eq('id', orderId)
-      .maybeSingle();
-    if (pendGetErr) return res.status(500).send('Pending fetch failed'); // retry
-    if (!pending) return res.status(500).send('No pending snapshot'); // retry
+      .from('pending_orders').select('*').eq('id', orderId).maybeSingle();
+    if (pendGetErr) return res.status(500).send('Pending fetch failed');
+    if (!pending) return res.status(500).send('No pending snapshot');
 
     const { error: orderErr } = await supabase.from('orders').insert([{
       id: pending.id,
@@ -207,34 +176,30 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       status: 'Preparing',
       created_at: new Date().toISOString(),
     }]);
-    if (orderErr) return res.status(500).send('Order insert failed'); // retry
+    if (orderErr) return res.status(500).send('Order insert failed');
 
     const cart = Array.isArray(pending.cart) ? pending.cart : pending.cart || [];
-    const itemsPayload = cart.map((ci) => ({
+    const itemsPayload = cart.map(ci => ({
       order_id: pending.id,
       item_id: ci.item.id,
       qty: ci.qty,
       price: Math.max(0, Number(ci.item.price) - FLAT_ITEM_DISCOUNT),
     }));
     const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
-    if (itemsErr) return res.status(500).send('Order items insert failed'); // retry
+    if (itemsErr) return res.status(500).send('Order items insert failed');
 
     await supabase.from('pending_orders').delete().eq('id', pending.id);
     return res.status(200).send('OK');
   } catch (e) {
     console.error('Webhook error:', e);
-    return res.status(500).send('Failed'); // retry
+    return res.status(500).send('Failed');
   }
 });
 
-// Optional: GET for client polling
 app.get('/api/orders/:id', async (req, res) => {
   const id = req.params.id;
   const { data, error } = await supabase
-    .from('orders')
-    .select('id,status')
-    .eq('id', id)
-    .maybeSingle();
+    .from('orders').select('id,status').eq('id', id).maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
   return res.json({ exists: !!data, status: data?.status || null });
 });
