@@ -94,7 +94,7 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// ----- THE MAIN WEBHOOK -----
+// THE MAIN WEBHOOK LOGIC
 app.post('/api/cashfree/webhook', async (req, res) => {
   try {
     const timestamp = req.header('x-webhook-timestamp');
@@ -116,7 +116,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
 
     if (payStatus !== 'SUCCESS') return res.status(200).send('Ignored non-success');
 
-    // payments upsert
+    // 1) Payments upsert (idempotent)
     const payRow = {
       cf_payment_id: paymentId,
       order_id: orderId,
@@ -129,12 +129,14 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       .upsert([payRow], { onConflict: 'cf_payment_id', ignoreDuplicates: true });
     if (payErr) return res.status(500).send('Payments upsert failed');
 
-    // check existing order
+    // 2) If order header exists, reconcile items if missing
     const { data: existingOrder } = await supabase
-      .from('orders').select('id').eq('id', orderId).maybeSingle();
+      .from('orders')
+      .select('id')
+      .eq('id', orderId)
+      .maybeSingle();
 
     if (existingOrder) {
-      // check items
       const { count, error: itemsCountErr } = await supabase
         .from('order_items')
         .select('id', { count: 'exact', head: true })
@@ -142,13 +144,14 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       if (itemsCountErr) return res.status(500).send('Order items count failed');
 
       if ((count || 0) === 0) {
-        // must build items from pending
         const { data: pending, error: pendGetErr } = await supabase
           .from('pending_orders').select('*').eq('id', orderId).maybeSingle();
         if (pendGetErr) return res.status(500).send('Pending fetch failed');
         if (!pending) return res.status(500).send('No pending for reconciliation');
 
         const cart = Array.isArray(pending.cart) ? pending.cart : pending.cart || [];
+        if (!cart || cart.length === 0) return res.status(500).send('No cart to reconcile');
+
         const itemsPayload = cart.map(ci => ({
           order_id: orderId,
           item_id: ci.item.id,
@@ -163,7 +166,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       return res.status(200).send('Order already exists');
     }
 
-    // must build order+items from pending
+    // 3) Write order and items from pending
     const { data: pending, error: pendGetErr } = await supabase
       .from('pending_orders').select('*').eq('id', orderId).maybeSingle();
     if (pendGetErr) return res.status(500).send('Pending fetch failed');
@@ -179,6 +182,8 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     if (orderErr) return res.status(500).send('Order insert failed');
 
     const cart = Array.isArray(pending.cart) ? pending.cart : pending.cart || [];
+    if (!cart || cart.length === 0) return res.status(500).send('No cart found in pending');
+
     const itemsPayload = cart.map(ci => ({
       order_id: pending.id,
       item_id: ci.item.id,
