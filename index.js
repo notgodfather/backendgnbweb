@@ -11,26 +11,28 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Supabase service role client (server-only)
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
-); // server-only service role [web:12]
+); // server-side only [web:12]
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 
-// Use raw body ONLY for the webhook route
+// IMPORTANT: Raw body only for webhook route (for HMAC verification)
 app.use('/api/cashfree/webhook', bodyParser.raw({ type: '*/*' }));
 
-// Other routes parse JSON normally
+// JSON for all other routes
 app.use(express.json());
 
+// Cashfree PG config
 const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
 const API_VERSION = '2023-08-01';
 
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 
-// Keep discount logic consistent with client
+// Keep discount consistent with client
 const FLAT_ITEM_DISCOUNT = 5.0;
 
 function authHeaders() {
@@ -45,7 +47,7 @@ app.get('/health', (_req, res) =>
   res.json({ ok: true, env: isSandbox ? 'sandbox' : 'production' })
 );
 
-// Create Cashfree order and cache pending snapshot
+// Create Cashfree order and cache pending snapshot for webhook reconstruction
 app.post('/api/create-order', async (req, res) => {
   try {
     const { cart, user, amount } = req.body;
@@ -80,13 +82,13 @@ app.post('/api/create-order', async (req, res) => {
       return res.status(500).json({ error: 'No payment_session_id from Cashfree', raw: cfResp.data });
     }
 
-    // Cache pending snapshot for webhook reconstruction
+    // Cache pending snapshot
     const snapshot = {
       id: cashfreeOrderId,
       user_id: user.uid,
       user_email: user.email || 'noemail@example.com',
       amount: orderAmount,
-      cart: cart,
+      cart: cart, // JSONB
       created_at: new Date().toISOString(),
     };
     const { error: pendErr } = await supabase.from('pending_orders').upsert([snapshot]);
@@ -105,15 +107,15 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// Webhook: verify signature, upsert payment idempotently, write order+items, safe on retries
+// Webhook: verify signature, idempotent persistence, safe on retries
 app.post('/api/cashfree/webhook', async (req, res) => {
   try {
     const timestamp = req.header('x-webhook-timestamp');
     const signature = req.header('x-webhook-signature');
-    const raw = req.body;
+    const raw = req.body; // Buffer
     const payloadStr = raw.toString('utf8');
 
-    // Verify HMAC signature: Base64(HMAC_SHA256(ts + rawBody, clientSecret))
+    // Verify signature: Base64(HMAC_SHA256(timestamp + rawBody, client secret))
     const expected = crypto
       .createHmac('sha256', process.env.CASHFREE_CLIENT_SECRET)
       .update(timestamp + payloadStr)
@@ -133,12 +135,12 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     const paymentId = String(payment.cf_payment_id || '');
     const payStatus = payment.payment_status;
 
-    // Process only successful payments
+    // Process only terminal success
     if (payStatus !== 'SUCCESS') {
       return res.status(200).send('Ignored non-success');
     }
 
-    // Idempotent: if order already exists, acknowledge
+    // Idempotent short-circuit: if order already exists, acknowledge and stop
     const { data: existingOrder } = await supabase
       .from('orders')
       .select('id')
@@ -148,7 +150,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       return res.status(200).send('Order already exists');
     }
 
-    // Idempotent: upsert payment to tolerate duplicate deliveries
+    // Payments upsert (ignore duplicate webhook deliveries)
     const payRow = {
       cf_payment_id: paymentId,
       order_id: orderId,
@@ -161,10 +163,10 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       .upsert([payRow], { onConflict: 'cf_payment_id', ignoreDuplicates: true });
     if (payErr) {
       console.error('payments upsert error:', payErr);
-      return res.status(500).send('Payments upsert failed');
+      return res.status(500).send('Payments upsert failed'); // retry
     }
 
-    // Fetch pending snapshot; if missing, ask Cashfree to retry later
+    // Fetch pending snapshot
     const { data: pending, error: pendGetErr } = await supabase
       .from('pending_orders')
       .select('*')
@@ -172,14 +174,14 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       .maybeSingle();
     if (pendGetErr) {
       console.error('pending_orders fetch error:', pendGetErr);
-      return res.status(500).send('Pending fetch failed');
+      return res.status(500).send('Pending fetch failed'); // retry
     }
     if (!pending) {
       console.error('No pending snapshot for', orderId);
-      return res.status(500).send('No pending snapshot');
+      return res.status(500).send('No pending snapshot'); // retry
     }
 
-    // Insert order
+    // Insert order header (single attempt)
     const { error: orderErr } = await supabase.from('orders').insert([{
       id: pending.id,
       user_id: pending.user_id,
@@ -189,10 +191,10 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     }]);
     if (orderErr) {
       console.error('orders insert error:', orderErr);
-      return res.status(500).send('Order insert failed');
+      return res.status(500).send('Order insert failed'); // retry
     }
 
-    // Insert order items using stored cart and same discount logic
+    // Insert items with same discount logic used by client
     const cart = pending.cart || [];
     const itemsPayload = cart.map((ci) => ({
       order_id: pending.id,
@@ -203,20 +205,20 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
     if (itemsErr) {
       console.error('order_items insert error:', itemsErr);
-      return res.status(500).send('Order items insert failed');
+      return res.status(500).send('Order items insert failed'); // retry
     }
 
-    // Cleanup snapshot
+    // Cleanup pending snapshot
     await supabase.from('pending_orders').delete().eq('id', pending.id);
 
     return res.status(200).send('OK');
   } catch (e) {
     console.error('Webhook error:', e);
-    return res.status(500).send('Failed');
+    return res.status(500).send('Failed'); // retry
   }
 });
 
-// Optional: client polling endpoint
+// Optional: poll endpoint for client after checkout
 app.get('/api/orders/:id', async (req, res) => {
   const id = req.params.id;
   const { data, error } = await supabase
