@@ -9,8 +9,7 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// IMPORTANT: Ensure this key has write access to 'orders' and 'order_items'
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY); 
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 app.use(cors({
   origin: process.env.CORS_ORIGIN || '*'
@@ -31,10 +30,19 @@ function authHeaders() {
   };
 }
 
-// Keep computeAmountFromCart as is (not shown)
+function computeAmountFromCart(cart) {
+// ... (computeAmountFromCart function remains the same) ...
+  if (!Array.isArray(cart)) return 0;
+  return cart.reduce((sum, { price, quantity }) => {
+    const p = Number(price);
+    const q = Number(quantity);
+    if (isNaN(p) || isNaN(q) || p < 0 || q < 0) throw new Error("Invalid price or quantity");
+    return sum + p * q;
+  }, 0).toFixed(2);
+}
 
+// 1. CREATE ORDER (Unchanged, ensures we get orderId and paymentSessionId)
 app.post('/api/create-order', async (req, res) => {
-// ... (Your existing create-order code remains unchanged)
   try {
     const { cart, user, amount } = req.body;
     if (!user?.uid) return res.status(400).json({ error: 'Missing user info' });
@@ -46,13 +54,6 @@ app.post('/api/create-order', async (req, res) => {
 
     const cashfreeOrderId = 'order_' + Date.now();
 
-    // Extract necessary data from cart and user for later recording
-    const metadata = {
-      userId: user.uid,
-      userEmail: user.email,
-      cartData: JSON.stringify(cart), // Store cart data as JSON string
-    };
-    
     const payload = {
       order_id: cashfreeOrderId,
       order_amount: orderAmount,
@@ -65,10 +66,8 @@ app.post('/api/create-order', async (req, res) => {
       },
       order_note: 'College canteen order',
       order_meta: {
-        // Crucially, we keep the notify_url for webhooks, even if we don't actively use it yet.
         return_url: `${PUBLIC_BASE_URL}/pg/return?order_id={order_id}`,
         notify_url: `${PUBLIC_BASE_URL}/api/cashfree/webhook`,
-        // We can include some metadata here, though we rely on client-side context for the full cart
       },
     };
 
@@ -87,9 +86,6 @@ app.post('/api/create-order', async (req, res) => {
       amount: orderAmount,
       currency: 'INR',
       envMode: isSandbox ? 'sandbox' : 'production',
-      // IMPORTANT: Pass user/cart data to client, which passes it to finalize-order
-      userDetails: user,
-      cartData: cart,
     });
   } catch (error) {
     console.error('Create order error:', error.response?.data || error.message);
@@ -97,11 +93,7 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// REMOVED: app.post('/api/verify-order', ...)
-
-// REMOVED: app.post('/api/record-order', ...)
-
-// NEW COMBINED ENDPOINT: Finalizes the order after client payment
+// 2. FINALIZE ORDER (New/Combined Endpoint)
 app.post('/api/finalize-order', async (req, res) => {
   try {
     const { orderId, userId, userEmail, cart } = req.body;
@@ -110,13 +102,14 @@ app.post('/api/finalize-order', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields for finalization' });
     }
 
-    // 1. Check Cashfree Status
+    // A. Check Cashfree Status (Verification)
     const verificationResponse = await axios.get(`${BASE_URL}/orders/${orderId}`, { headers: authHeaders() });
     const data = verificationResponse.data;
     const status = data.order_status;
     console.log(`Finalizing order ${orderId}. Cashfree Status: ${status}`);
 
     if (status !== 'PAID' && status !== 'SUCCESS') {
+      // If payment failed, return 402 Payment Required
       return res.status(402).json({ 
         error: 'Payment not successful', 
         status: status,
@@ -124,7 +117,7 @@ app.post('/api/finalize-order', async (req, res) => {
       });
     }
 
-    // 2. Check Database Idempotency
+    // B. Check Database Idempotency
     const { data: existingOrder } = await supabase
       .from('orders')
       .select('id')
@@ -132,10 +125,11 @@ app.post('/api/finalize-order', async (req, res) => {
       .single();
 
     if (existingOrder) {
+      // Return success if already recorded (idempotent success)
       return res.json({ success: true, orderId, message: 'Order already recorded (idempotent success)' });
     }
 
-    // 3. Record Order
+    // C. Record Order in Supabase
     const { data: order, error: orderErr } = await supabase
       .from('orders')
       .insert([{
@@ -150,7 +144,7 @@ app.post('/api/finalize-order', async (req, res) => {
 
     if (orderErr) throw orderErr;
 
-    // 4. Record Items
+    // D. Record Items
     const itemsPayload = cart.map(ci => ({
       order_id: order.id,
       item_id: ci.item.id,
@@ -161,11 +155,12 @@ app.post('/api/finalize-order', async (req, res) => {
     const { error: itemErr } = await supabase.from('order_items').insert(itemsPayload);
     if (itemErr) throw itemErr;
 
+    // Final Success
     res.json({ success: true, orderId: order.id, status: 'PAID' });
   } catch (error) {
     console.error('Finalize order error:', error.response?.data || error.message);
-    // Use 500 status only if the server/DB part failed, not if payment failed (402)
-    const status = error.response?.status || 500;
+    // Use 500 status for database/server issues to distinguish from 402 (payment failure)
+    const status = error.response?.status === 402 ? 402 : 500;
     res.status(status).json({ 
       error: 'Order finalization failed', 
       details: error.response?.data || error.message 
