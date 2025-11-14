@@ -94,7 +94,7 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-
+// THE MAIN WEBHOOK LOGIC
 app.post('/api/cashfree/webhook', async (req, res) => {
   try {
     const timestamp = req.header('x-webhook-timestamp');
@@ -105,6 +105,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     if (!signature || expected !== signature) {
       return res.status(400).send('Invalid signature');
     }
+
     const event = JSON.parse(payloadStr);
     const data = event.data || {};
     const order = data.order || {};
@@ -113,7 +114,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     const paymentId = String(payment.cf_payment_id || '');
     const payStatus = payment.payment_status;
 
-    console.error("Order id : ", orderId);
+    console.error("OrderId: ", orderId);
     if (payStatus !== 'SUCCESS') return res.status(200).send('Ignored non-success');
 
     // 1) Payments upsert (idempotent)
@@ -129,12 +130,12 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       .upsert([payRow], { onConflict: 'cf_payment_id', ignoreDuplicates: true });
     if (payErr) return res.status(500).send('Payments upsert failed');
 
+    // 2) If order header exists, reconcile items if missing
     const { data: existingOrder } = await supabase
       .from('orders')
       .select('id')
       .eq('id', orderId)
       .maybeSingle();
-
 
     if (existingOrder) {
       const { count, error: itemsCountErr } = await supabase
@@ -149,6 +150,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
         if (pendGetErr) return res.status(500).send('Pending fetch failed');
         if (!pending) return res.status(500).send('No pending for reconciliation');
 
+        console.log("Pending Table cart: ", pending.cart);
         const cart = Array.isArray(pending.cart) ? pending.cart : pending.cart || [];
         if (!cart || cart.length === 0) return res.status(500).send('No cart to reconcile');
 
