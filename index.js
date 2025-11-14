@@ -22,6 +22,9 @@ const API_VERSION = "2023-08-01";
 
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 
+// 💰 FLAT DISCOUNT CONSTANT (Must match client)
+const FLAT_ITEM_DISCOUNT = 5.00;
+
 function authHeaders() {
   return {
     'x-client-id': process.env.CASHFREE_CLIENT_ID,
@@ -31,32 +34,35 @@ function authHeaders() {
 }
 
 function computeAmountFromCart(cart) {
-// ... (computeAmountFromCart function remains the same) ...
   if (!Array.isArray(cart)) return 0;
   return cart.reduce((sum, { price, quantity }) => {
     const p = Number(price);
     const q = Number(quantity);
     if (isNaN(p) || isNaN(q) || p < 0 || q < 0) throw new Error("Invalid price or quantity");
-    return sum + p * q;
+    
+    // Apply discount per item
+    const discountedPrice = Math.max(0, p - FLAT_ITEM_DISCOUNT); 
+    
+    return sum + discountedPrice * q;
   }, 0).toFixed(2);
 }
 
-// 1. CREATE ORDER (Unchanged, ensures we get orderId and paymentSessionId)
+// --- API: Create Cashfree Order ---
 app.post('/api/create-order', async (req, res) => {
   try {
     const { cart, user, amount } = req.body;
     if (!user?.uid) return res.status(400).json({ error: 'Missing user info' });
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Cart is empty' });
 
+    // The client sends the final discounted amount.
     const orderAmount = Number(amount);
-  if (isNaN(orderAmount) || orderAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-
+    if (isNaN(orderAmount) || orderAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
     const cashfreeOrderId = 'order_' + Date.now();
 
     const payload = {
       order_id: cashfreeOrderId,
-      order_amount: orderAmount,
+      order_amount: orderAmount, // Discounted amount sent to Cashfree
       order_currency: 'INR',
       customer_details: {
         customer_id: user.uid,
@@ -93,7 +99,7 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// 2. FINALIZE ORDER (New/Combined Endpoint)
+// --- API: Finalize Order (Verify + Record) ---
 app.post('/api/finalize-order', async (req, res) => {
   try {
     const { orderId, userId, userEmail, cart } = req.body;
@@ -149,7 +155,9 @@ app.post('/api/finalize-order', async (req, res) => {
       order_id: order.id,
       item_id: ci.item.id,
       qty: ci.qty,
-      price: Number(ci.item.price),
+      // Record original price in DB, or use the discounted price depending on your reporting needs.
+      // We'll record the discounted price here, as it matches the order total.
+      price: Math.max(0, Number(ci.item.price) - FLAT_ITEM_DISCOUNT), 
     }));
 
     const { error: itemErr } = await supabase.from('order_items').insert(itemsPayload);
