@@ -94,7 +94,6 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// THE MAIN WEBHOOK LOGIC
 app.post('/api/cashfree/webhook', async (req, res) => {
   try {
     const timestamp = req.header('x-webhook-timestamp');
@@ -114,7 +113,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     const paymentId = String(payment.cf_payment_id || '');
     const payStatus = payment.payment_status;
 
-    console.error("OrderId: ", orderId);
+    //console.error("OrderId: ", orderId);
     if (payStatus !== 'SUCCESS') return res.status(200).send('Ignored non-success');
 
     // 1) Payments upsert (idempotent)
@@ -156,12 +155,13 @@ app.post('/api/cashfree/webhook', async (req, res) => {
 
         const itemsPayload = cart.map(ci => ({
           order_id: orderId,
-          item_id: ci.item.id,
+          item_id: ci.id,
           qty: ci.qty,
-          price: Math.max(0, Number(ci.item.price) - FLAT_ITEM_DISCOUNT),
+          price: Math.max(0, Number(ci.price) - FLAT_ITEM_DISCOUNT),
         }));
         const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
         if (itemsErr) return res.status(500).send('Order items reconcile failed');
+
 
         await supabase.from('pending_orders').delete().eq('id', orderId);
       }
@@ -188,7 +188,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
 
     const itemsPayload = cart.map(ci => ({
       order_id: pending.id,
-      item_id: ci.item.id,
+      item_id: ci.id,
       qty: ci.qty,
       price: Math.max(0, Number(ci.item.price) - FLAT_ITEM_DISCOUNT),
     }));
