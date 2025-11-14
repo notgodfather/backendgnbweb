@@ -192,9 +192,11 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       qty: ci.qty,
       price: Math.max(0, Number(ci.price) - FLAT_ITEM_DISCOUNT),
     }));
+    console.log("Items Payload : ", itemsPayload);
     const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
     if (itemsErr) return res.status(500).send('Order items insert failed');
 
+    console.log("Order items inserted");
     await supabase.from('pending_orders').delete().eq('id', pending.id);
     return res.status(200).send('OK');
   } catch (e) {
