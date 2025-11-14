@@ -190,7 +190,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       order_id: pending.id,
       item_id: ci.id,
       qty: ci.qty,
-      price: Math.max(0, Number(ci.item.price) - FLAT_ITEM_DISCOUNT),
+      price: Math.max(0, Number(ci.price) - FLAT_ITEM_DISCOUNT),
     }));
     const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
     if (itemsErr) return res.status(500).send('Order items insert failed');
