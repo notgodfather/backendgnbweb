@@ -157,7 +157,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
           order_id: orderId,
           item_id: ci.id,
           qty: ci.quantity,
-          price: Math.max(0, Number(ci.price) - FLAT_ITEM_DISCOUNT),
+          price: Number(ci.price),
         }));
         const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
         if (itemsErr) return res.status(500).send('Order items reconcile failed');
@@ -190,7 +190,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       order_id: pending.id,
       item_id: ci.id,
       qty: ci.quantity,
-      price: Math.max(0, Number(ci.price) - FLAT_ITEM_DISCOUNT),
+      price:Number(ci.price),
     }));
     console.log("Items Payload : ", itemsPayload);
     const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
