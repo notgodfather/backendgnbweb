@@ -113,7 +113,6 @@ app.post('/api/cashfree/webhook', async (req, res) => {
     const paymentId = String(payment.cf_payment_id || '');
     const payStatus = payment.payment_status;
 
-    //console.error("OrderId: ", orderId);
     if (payStatus !== 'SUCCESS') return res.status(200).send('Ignored non-success');
 
     // 1) Payments upsert (idempotent)
@@ -162,7 +161,6 @@ app.post('/api/cashfree/webhook', async (req, res) => {
         const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
         if (itemsErr) return res.status(500).send('Order items reconcile failed');
 
-
         await supabase.from('pending_orders').delete().eq('id', orderId);
       }
       return res.status(200).send('Order already exists');
@@ -190,13 +188,13 @@ app.post('/api/cashfree/webhook', async (req, res) => {
       order_id: pending.id,
       item_id: ci.id,
       qty: ci.quantity,
-      price:Number(ci.price),
+      price: Number(ci.price),
     }));
     console.log("Items Payload : ", itemsPayload);
     const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
     if (itemsErr) {
       console.error('Order items insert error:', itemsErr);
-      return res.status(500).send('Order items insert failed');
+      return res.status(500).send('Order items insert failed');
     }
 
     console.log("Order items inserted");
@@ -205,6 +203,28 @@ app.post('/api/cashfree/webhook', async (req, res) => {
   } catch (e) {
     console.error('Webhook error:', e);
     return res.status(500).send('Failed');
+  }
+});
+
+// 👉 NEW: print queue endpoint for local print server
+app.get('/api/print-queue', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('id, user_email, created_at, status')
+      .eq('status', 'Preparing')
+      .order('created_at', { ascending: true })
+      .limit(20);
+
+    if (error) {
+      console.error('print-queue error:', error);
+      return res.status(500).json({ error: 'Failed to fetch print queue' });
+    }
+
+    return res.json(data || []);
+  } catch (e) {
+    console.error('print-queue exception:', e);
+    return res.status(500).json({ error: 'Internal error in print queue' });
   }
 });
 
