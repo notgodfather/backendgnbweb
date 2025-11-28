@@ -227,6 +227,48 @@ app.get('/api/print-queue', async (_req, res) => {
     return res.status(500).json({ error: 'Internal error in print queue' });
   }
 });
+// Return order header + items for printing
+app.get('/api/order-with-items/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    // Order header
+    const { data: order, error: orderErr } = await supabase
+      .from('orders')
+      .select('id, user_email, created_at, status')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (orderErr) {
+      console.error('order-with-items orderErr:', orderErr);
+      return res.status(500).json({ error: 'Order fetch failed' });
+    }
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    // Items: join order_items to food_items to get names
+    const { data: items, error: itemsErr } = await supabase
+      .from('order_items')
+      .select(`
+        qty,
+        price,
+        food_items ( name )
+      `)
+      .eq('order_id', id);
+
+    if (itemsErr) {
+      console.error('order-with-items itemsErr:', itemsErr);
+      return res.status(500).json({ error: 'Items fetch failed' });
+    }
+
+    return res.json({ order, items: items || [] });
+  } catch (e) {
+    console.error('order-with-items exception:', e);
+    return res.status(500).json({ error: 'Internal error in order-with-items' });
+  }
+});
+
 
 app.get('/api/orders/:id', async (req, res) => {
   const id = req.params.id;
@@ -234,6 +276,28 @@ app.get('/api/orders/:id', async (req, res) => {
     .from('orders').select('id,status').eq('id', id).maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
   return res.json({ exists: !!data, status: data?.status || null });
+});
+
+// Mark an order as printed so it doesn't reprint
+app.post('/api/orders/:id/mark-printed', async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const { error } = await supabase
+      .from('orders')
+      .update({ status: 'Printed' })
+      .eq('id', id);
+
+    if (error) {
+      console.error('mark-printed error:', error);
+      return res.status(500).json({ error: 'Failed to mark order as printed' });
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('mark-printed exception:', e);
+    return res.status(500).json({ error: 'Internal error in mark-printed' });
+  }
 });
 
 app.listen(PORT, () => console.log(`Server running at port ${PORT}`));
