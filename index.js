@@ -210,11 +210,13 @@ app.post('/api/cashfree/webhook', async (req, res) => {
 app.get('/api/print-queue', async (_req, res) => {
   try {
     const { data, error } = await supabase
-      .from('orders')
-      .select('id, user_email, created_at, status')
-      .eq('status', 'Preparing')
-      .order('created_at', { ascending: true })
-      .limit(20);
+  .from('orders')
+  .select('id, user_email, created_at, status, printed')
+  .eq('status', 'Preparing')
+  .eq('printed', false)
+  .order('created_at', { ascending: true })
+  .limit(20);
+
 
     if (error) {
       console.error('print-queue error:', error);
@@ -285,7 +287,7 @@ app.post('/api/orders/:id/mark-printed', async (req, res) => {
 
     const { error } = await supabase
       .from('orders')
-      .update({ status: 'Printed' })
+      .update({ printed: true })
       .eq('id', id);
 
     if (error) {
@@ -299,5 +301,6 @@ app.post('/api/orders/:id/mark-printed', async (req, res) => {
     return res.status(500).json({ error: 'Internal error in mark-printed' });
   }
 });
+
 
 app.listen(PORT, () => console.log(`Server running at port ${PORT}`));
