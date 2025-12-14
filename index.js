@@ -206,17 +206,16 @@ app.post('/api/cashfree/webhook', async (req, res) => {
   }
 });
 
-// 👉 NEW: print queue endpoint for local print server
+// 👉 print queue endpoint for Android daemon
 app.get('/api/print-queue', async (_req, res) => {
   try {
     const { data, error } = await supabase
-  .from('orders')
-  .select('id, user_email, created_at, status, printed')
-  .eq('status', 'Preparing')
-  .eq('printed', false)
-  .order('created_at', { ascending: true })
-  .limit(20);
-
+      .from('orders')
+      .select('id, user_email, created_at, status, printed')
+      .eq('status', 'Preparing')
+      .eq('printed', false)
+      .order('created_at', { ascending: true })
+      .limit(20);
 
     if (error) {
       console.error('print-queue error:', error);
@@ -229,12 +228,12 @@ app.get('/api/print-queue', async (_req, res) => {
     return res.status(500).json({ error: 'Internal error in print queue' });
   }
 });
+
 // Return order header + items for printing
 app.get('/api/order-with-items/:id', async (req, res) => {
   try {
     const id = req.params.id;
 
-    // Order header
     const { data: order, error: orderErr } = await supabase
       .from('orders')
       .select('id, user_email, created_at, status')
@@ -249,7 +248,6 @@ app.get('/api/order-with-items/:id', async (req, res) => {
       return res.status(404).json({ error: 'Order not found' });
     }
 
-    // Items: join order_items to food_items to get names
     const { data: items, error: itemsErr } = await supabase
       .from('order_items')
       .select(`
@@ -271,7 +269,6 @@ app.get('/api/order-with-items/:id', async (req, res) => {
   }
 });
 
-
 app.get('/api/orders/:id', async (req, res) => {
   const id = req.params.id;
   const { data, error } = await supabase
@@ -284,10 +281,14 @@ app.get('/api/orders/:id', async (req, res) => {
 app.post('/api/orders/:id/mark-printed', async (req, res) => {
   try {
     const id = req.params.id;
+    const { bill_no } = req.body || {};
 
     const { error } = await supabase
       .from('orders')
-      .update({ printed: true })
+      .update({
+        printed: true,
+        bill_no: bill_no ?? null,   // requires integer bill_no column in orders
+      })
       .eq('id', id);
 
     if (error) {
@@ -301,6 +302,5 @@ app.post('/api/orders/:id/mark-printed', async (req, res) => {
     return res.status(500).json({ error: 'Internal error in mark-printed' });
   }
 });
-
 
 app.listen(PORT, () => console.log(`Server running at port ${PORT}`));
