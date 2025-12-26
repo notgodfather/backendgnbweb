@@ -302,7 +302,7 @@ app.post('/api/orders/:id/mark-printed', async (req, res) => {
     const dateOnly = new Date().toISOString().slice(0, 10);
 
     const { data: counter, error: counterError } = await supabase
-      .rpc('increment_daily_counter', { date: dateOnly });
+      .rpc('increment_daily_counter', { p_date: dateOnly });
 
     if (counterError) {
       console.error('increment_daily_counter RPC error:', counterError);
