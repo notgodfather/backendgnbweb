@@ -23,7 +23,7 @@ const isSandbox = process.env.CASHFREE_ENV !== 'production';
 const BASE_URL = isSandbox ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
 const API_VERSION = '2023-08-01';
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
-const FLAT_ITEM_DISCOUNT = 5.0; // Not used in this file, kept for reference
+const FLAT_ITEM_DISCOUNT = 5.0; // reserved
 
 function authHeaders() {
   return {
@@ -33,10 +33,12 @@ function authHeaders() {
   };
 }
 
+// Health
 app.get('/health', (_req, res) =>
   res.json({ ok: true, env: isSandbox ? 'sandbox' : 'production' })
 );
 
+// Create Cashfree order + pending snapshot
 app.post('/api/create-order', async (req, res) => {
   try {
     const { cart, user, amount } = req.body;
@@ -76,7 +78,7 @@ app.post('/api/create-order', async (req, res) => {
       user_id: user.uid,
       user_email: user.email || 'noemail@example.com',
       amount: orderAmount,
-      cart: cart,
+      cart,
       created_at: new Date().toISOString(),
     };
     const { error: pendErr } = await supabase.from('pending_orders').upsert([snapshot]);
@@ -95,6 +97,7 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
+// Cashfree webhook
 app.post('/api/cashfree/webhook', async (req, res) => {
   try {
     const timestamp = req.header('x-webhook-timestamp');
@@ -119,7 +122,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
 
     if (payStatus !== 'SUCCESS') return res.status(200).send('Ignored non-success');
 
-    // 1) Payments upsert (idempotent)
+    // 1) Payments upsert
     const payRow = {
       cf_payment_id: paymentId,
       order_id: orderId,
@@ -189,6 +192,7 @@ app.post('/api/cashfree/webhook', async (req, res) => {
         user_email: pending.user_email,
         status: 'Preparing',
         created_at: new Date().toISOString(),
+        printed: false,
       },
     ]);
     if (orderErr) return res.status(500).send('Order insert failed');
@@ -218,12 +222,12 @@ app.post('/api/cashfree/webhook', async (req, res) => {
   }
 });
 
-// 👉 print queue endpoint for Android daemon
+// Print queue for Android daemon
 app.get('/api/print-queue', async (_req, res) => {
   try {
     const { data, error } = await supabase
       .from('orders')
-      .select('id, user_email, created_at, status, printed')
+      .select('id, user_email, created_at, status, printed, bill_no')
       .eq('status', 'Preparing')
       .eq('printed', false)
       .order('created_at', { ascending: true })
@@ -241,14 +245,14 @@ app.get('/api/print-queue', async (_req, res) => {
   }
 });
 
-// Return order header + items for printing
+// Return order header + items
 app.get('/api/order-with-items/:id', async (req, res) => {
   try {
     const id = req.params.id;
 
     const { data: order, error: orderErr } = await supabase
       .from('orders')
-      .select('id, user_email, created_at, status')
+      .select('id, user_email, created_at, status, bill_no, printed')
       .eq('id', id)
       .maybeSingle();
 
@@ -262,13 +266,11 @@ app.get('/api/order-with-items/:id', async (req, res) => {
 
     const { data: items, error: itemsErr } = await supabase
       .from('order_items')
-      .select(
-        `
+      .select(`
         qty,
         price,
         food_items ( name )
-      `
-      )
+      `)
       .eq('order_id', id);
 
     if (itemsErr) {
@@ -283,22 +285,22 @@ app.get('/api/order-with-items/:id', async (req, res) => {
   }
 });
 
+// Simple order existence/status
 app.get('/api/orders/:id', async (req, res) => {
   const id = req.params.id;
   const { data, error } = await supabase
     .from('orders')
-    .select('id,status')
+    .select('id,status,printed,bill_no')
     .eq('id', id)
     .maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
-  return res.json({ exists: !!data, status: data?.status || null });
+  return res.json({ exists: !!data, status: data?.status || null, printed: data?.printed || false, bill_no: data?.bill_no || null });
 });
 
-// Mark an order as printed and assign the Bill Number from the server-side counter
-app.post('/api/orders/:id/mark-printed', async (req, res) => {
+// NEW: Assign bill number ONLY (do not mark printed)
+app.post('/api/orders/:id/assign-bill', async (req, res) => {
   try {
     const id = req.params.id;
-
     const dateOnly = new Date().toISOString().slice(0, 10);
 
     const { data: counter, error: counterError } = await supabase
@@ -317,9 +319,31 @@ app.post('/api/orders/:id/mark-printed', async (req, res) => {
     const { error: updateError } = await supabase
       .from('orders')
       .update({
-        printed: true,
         bill_no: newBillNo,
+        // printed stays false here
       })
+      .eq('id', id);
+
+    if (updateError) {
+      console.error('assign-bill update error:', updateError);
+      return res.status(500).json({ error: 'Failed to assign bill_no to order' });
+    }
+
+    return res.json({ ok: true, bill_no: newBillNo });
+  } catch (e) {
+    console.error('assign-bill exception:', e);
+    return res.status(500).json({ error: 'Internal error in assign-bill' });
+  }
+});
+
+// UPDATED: Mark printed ONLY after successful print on Android
+app.post('/api/orders/:id/mark-printed', async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const { error: updateError } = await supabase
+      .from('orders')
+      .update({ printed: true })
       .eq('id', id);
 
     if (updateError) {
@@ -327,7 +351,7 @@ app.post('/api/orders/:id/mark-printed', async (req, res) => {
       return res.status(500).json({ error: 'Failed to mark order as printed' });
     }
 
-    return res.json({ ok: true, bill_no: newBillNo });
+    return res.json({ ok: true });
   } catch (e) {
     console.error('mark-printed exception:', e);
     return res.status(500).json({ error: 'Internal error in mark-printed' });
